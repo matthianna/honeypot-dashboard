@@ -1,0 +1,218 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base styles */
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-card: #1a1a25;
+  --neon-green: #39ff14;
+  --neon-blue: #00d4ff;
+  --neon-orange: #ff6600;
+  --neon-purple: #bf00ff;
+  --neon-red: #ff3366;
+  --text-primary: #e0e0e0;
+  --text-secondary: #888888;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-secondary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-primary);
+}
+
+/* Neon text glow effects */
+.text-glow-green {
+  text-shadow: 0 0 10px var(--neon-green), 0 0 20px var(--neon-green);
+}
+
+.text-glow-blue {
+  text-shadow: 0 0 10px var(--neon-blue), 0 0 20px var(--neon-blue);
+}
+
+.text-glow-orange {
+  text-shadow: 0 0 10px var(--neon-orange), 0 0 20px var(--neon-orange);
+}
+
+.text-glow-purple {
+  text-shadow: 0 0 10px var(--neon-purple), 0 0 20px var(--neon-purple);
+}
+
+.text-glow-red {
+  text-shadow: 0 0 10px var(--neon-red), 0 0 20px var(--neon-red);
+}
+
+/* Card hover effects */
+.card-hover {
+  transition: all 0.3s ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Pulse animation for markers */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.5);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+.pulse-marker {
+  position: relative;
+}
+
+.pulse-marker::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: inherit;
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+/* Attack line animation */
+@keyframes attack-line {
+  0% {
+    stroke-dashoffset: 1000;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.attack-line {
+  stroke-dasharray: 1000;
+  animation: attack-line 2s ease-out forwards;
+}
+
+/* Loading spinner */
+.spinner {
+  border: 3px solid var(--bg-card);
+  border-top: 3px solid var(--neon-blue);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Grid pattern background */
+.grid-bg {
+  background-image: 
+    linear-gradient(rgba(57, 255, 20, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(57, 255, 20, 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+/* Gradient overlays */
+.gradient-border {
+  position: relative;
+}
+
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, var(--neon-green), var(--neon-blue));
+  -webkit-mask: 
+    linear-gradient(#fff 0 0) content-box, 
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+/* Leaflet custom styles */
+.leaflet-container {
+  background-color: var(--bg-primary) !important;
+}
+
+.leaflet-control-zoom a {
+  background-color: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--bg-secondary) !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background-color: var(--bg-hover) !important;
+}
+
+.leaflet-popup-content-wrapper {
+  background-color: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+  border-radius: 8px !important;
+}
+
+.leaflet-popup-tip {
+  background-color: var(--bg-card) !important;
+}
+
+/* Tab styles */
+.tab-active {
+  border-bottom: 2px solid var(--neon-green);
+  color: var(--neon-green);
+}
+
+/* Table styles */
+.table-row:hover {
+  background-color: var(--bg-hover);
+}
+
+/* IP link styles */
+.ip-link {
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.ip-link:hover {
+  color: var(--neon-blue);
+  text-decoration: underline;
+}
+
