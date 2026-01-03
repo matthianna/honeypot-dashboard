@@ -69,14 +69,24 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     
-    # CORS middleware
+    # CORS middleware - allow all origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
+        allow_origins=["*"],
+        allow_credentials=False,  # Must be False when using wildcard
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Custom middleware to handle credentials with dynamic origin
+    @app.middleware("http")
+    async def cors_handler(request: Request, call_next):
+        origin = request.headers.get("origin")
+        response = await call_next(request)
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
     
     # Security headers middleware
     @app.middleware("http")
@@ -123,6 +133,8 @@ def create_app() -> FastAPI:
     from app.routers.firewall import router as firewall_router
     from app.routers.attackmap import router as attackmap_router
     from app.routers.attacker import router as attacker_router
+    from app.routers.report import router as report_router
+    from app.routers.analytics import router as analytics_router
     
     # Include routers
     app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
@@ -135,6 +147,8 @@ def create_app() -> FastAPI:
     app.include_router(firewall_router, prefix="/api/firewall", tags=["Firewall"])
     app.include_router(attackmap_router, prefix="/api/attackmap", tags=["Attack Map"])
     app.include_router(attacker_router, prefix="/api/attacker", tags=["Attacker"])
+    app.include_router(report_router, prefix="/api/report", tags=["Thesis Report"])
+    app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
     
     return app
 

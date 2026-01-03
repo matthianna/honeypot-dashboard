@@ -43,29 +43,31 @@ class ElasticsearchService:
     }
     
     # Field mappings for each honeypot (src_ip and geo fields vary by index)
+    # NOTE: Cowrie now uses json.* structure from new filebeat pipeline
     FIELD_MAPPINGS = {
         "cowrie": {
-            "src_ip": "cowrie.src_ip",
-            "geo_country": "cowrie.geo.country_name",
-            "geo_city": "cowrie.geo.city_name",
-            "geo_location": "cowrie.geo.location",
-            "session": "cowrie.session",
-            "eventid": "cowrie.eventid",
-            "sensor": "cowrie.sensor",
+            "src_ip": "json.src_ip",  # Updated: now in json.* namespace
+            "geo_country": "source.geo.country_name",  # GeoIP enrichment in source.*
+            "geo_city": "source.geo.city_name",
+            "geo_location": "source.geo.location",
+            "session": "json.session",  # Updated
+            "eventid": "json.eventid",  # Updated
+            "sensor": "observer.name",  # Updated: sensor name in observer.name
         },
         "dionaea": {
-            "src_ip": "source.ip.keyword",
+            # Note: Dionaea uses regular indices with text+keyword multi-fields
+            "src_ip": "source.ip.keyword",  # Text field needs .keyword for aggregations
             "geo_country": "source.geo.country_name.keyword",
             "geo_city": "source.geo.city_name.keyword",
             "geo_location": "source.geo.location",
-            "component": "dionaea.component.keyword",
-            "transport": "network.transport.keyword",
+            "component": "dionaea.component",
+            "transport": "network.transport",
             "dst_port": "destination.port",
         },
         "galah": {
             "src_ip": "source.ip",
-            "geo_country": "source.geo.country_name.keyword",
-            "geo_city": "source.geo.city_name.keyword",
+            "geo_country": "source.geo.country_name",  # Already keyword type
+            "geo_city": "source.geo.city_name",
             "geo_location": "source.geo.location",
             "session": "session.id",
             "http_method": "http.request.method",
@@ -73,29 +75,29 @@ class ElasticsearchService:
         },
         "rdpy": {
             "src_ip": "source.ip",
-            "geo_country": "source.geo.country_name.keyword",
-            "geo_city": "source.geo.city_name.keyword",
+            "geo_country": "source.geo.country_name",  # Already keyword type
+            "geo_city": "source.geo.city_name",
             "geo_location": "source.geo.location",
         },
         "heralding": {
             "src_ip": "source.ip",
-            "geo_country": "source.geo.country_name.keyword",
-            "geo_city": "source.geo.city_name.keyword",
+            "geo_country": "source.geo.country_name",  # Already keyword type
+            "geo_city": "source.geo.city_name",
             "geo_location": "source.geo.location",
             "session": "session_id",
-            "protocol": "network.protocol",
+            "protocol": "network.protocol",  # Already keyword type
             "dst_port": "destination.port",
         },
         "firewall": {
             "src_ip": "source.ip",
-            "geo_country": "source.geo.country_name.keyword",
-            "geo_city": "source.geo.city_name.keyword",
+            "geo_country": "source.geo.country_name",  # Already keyword type in filebeat index
+            "geo_city": "source.geo.city_name",
             "geo_location": "source.geo.location",
-            "action": "fw.action.keyword",
+            "action": "fw.action",  # Already keyword type
             "dst_port": "destination.port",
             "dst_ip": "destination.ip",
-            "transport": "network.transport.keyword",
-            "direction": "network.direction.keyword",
+            "transport": "network.transport",  # Already keyword type
+            "direction": "network.direction",  # Already keyword type
         },
     }
     
@@ -468,12 +470,15 @@ class ElasticsearchService:
         sort: Optional[List[Dict[str, str]]] = None,
         aggs: Optional[Dict[str, Any]] = None,
         fields: Optional[List[str]] = None,
+        from_: int = 0,
+        track_total_hits: bool = False,
     ) -> Dict[str, Any]:
         """Execute a custom search query."""
         try:
             body: Dict[str, Any] = {
                 "query": query,
                 "size": size,
+                "from": from_,
             }
             
             if sort:
@@ -482,6 +487,8 @@ class ElasticsearchService:
                 body["aggs"] = aggs
             if fields:
                 body["_source"] = fields
+            if track_total_hits:
+                body["track_total_hits"] = True
             
             result = await self.client.search(index=index, body=body)
             return result

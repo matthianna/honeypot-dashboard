@@ -125,7 +125,7 @@ export const Attackers: React.FC = () => {
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [selectedAttacker, setSelectedAttacker] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [viewMode, setViewMode] = useState<'countries' | 'top'>('countries');
+  const [viewMode, setViewMode] = useState<'countries' | 'top' | 'cross-honeypot'>('countries');
 
   // Fetch countries data
   const { data: countriesData, loading: countriesLoading } = useApiWithRefresh(
@@ -145,6 +145,13 @@ export const Attackers: React.FC = () => {
   const { data: countryAttackersData, loading: countryAttackersLoading } = useApiWithRefresh(
     useCallback(() => selectedCountry ? api.getCountryAttackers(selectedCountry, timeRange) : Promise.resolve(null), [selectedCountry, timeRange]),
     [selectedCountry, timeRange],
+    60000
+  );
+
+  // Fetch cross-honeypot threat intel
+  const { data: threatIntel, loading: threatIntelLoading } = useApiWithRefresh(
+    useCallback(() => api.getThreatIntel(timeRange), [timeRange]),
+    [timeRange],
     60000
   );
 
@@ -286,6 +293,17 @@ export const Attackers: React.FC = () => {
             <Users className="w-4 h-4 inline mr-2" />
             Top Attackers
           </button>
+          <button
+            onClick={() => setViewMode('cross-honeypot')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              viewMode === 'cross-honeypot' 
+                ? 'bg-neon-purple text-bg-primary' 
+                : 'text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            <Activity className="w-4 h-4 inline mr-2" />
+            Cross-Honeypot
+          </button>
         </div>
 
         <div className="relative w-full sm:w-64">
@@ -305,11 +323,13 @@ export const Attackers: React.FC = () => {
         <div className="lg:col-span-1">
           <Card className="h-[700px] flex flex-col">
             <CardHeader 
-              title={viewMode === 'countries' ? 'Attack Sources' : 'Top Attackers'}
+              title={viewMode === 'countries' ? 'Attack Sources' : viewMode === 'top' ? 'Top Attackers' : 'Multi-Honeypot Actors'}
               subtitle={viewMode === 'countries' 
                 ? `${filteredCountries.length} countries` 
-                : `${filteredTopAttackers.length} attackers`}
-              icon={viewMode === 'countries' ? <Globe className="w-5 h-5" /> : <Users className="w-5 h-5" />}
+                : viewMode === 'top' 
+                  ? `${filteredTopAttackers.length} attackers`
+                  : `${threatIntel?.cross_honeypot_actors?.length || 0} actors (${threatIntel?.summary?.multi_percentage || 0}% of total)`}
+              icon={viewMode === 'countries' ? <Globe className="w-5 h-5" /> : viewMode === 'top' ? <Users className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
             />
             <CardContent className="flex-1 overflow-y-auto p-0">
               {(viewMode === 'countries' ? countriesLoading : topLoading) ? (
@@ -351,7 +371,7 @@ export const Attackers: React.FC = () => {
                     </button>
                   ))}
                 </div>
-              ) : (
+              ) : viewMode === 'top' ? (
                 <div className="divide-y divide-bg-hover">
                   {filteredTopAttackers.map((attacker: TopAttacker, index: number) => (
                     <button
@@ -387,6 +407,52 @@ export const Attackers: React.FC = () => {
                     </button>
                   ))}
                 </div>
+              ) : (
+                /* Cross-Honeypot View */
+                threatIntelLoading ? (
+                  <div className="h-full flex items-center justify-center">
+                    <LoadingSpinner />
+                  </div>
+                ) : (
+                  <div className="divide-y divide-bg-hover">
+                    {threatIntel?.cross_honeypot_actors?.map((actor, index) => (
+                      <button
+                        key={actor.ip}
+                        onClick={() => setSelectedAttacker(actor.ip)}
+                        className="w-full p-4 text-left hover:bg-bg-hover transition-colors"
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono text-text-muted w-6">#{index + 1}</span>
+                            <span className="font-mono text-neon-purple">{actor.ip}</span>
+                          </div>
+                          <span className="px-2 py-0.5 rounded-full text-xs bg-neon-purple/20 text-neon-purple">
+                            {actor.honeypot_count} honeypots
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-sm mb-2">
+                          <span className="text-neon-orange">{formatNumber(actor.total_events)} events</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {actor.honeypots.map((hp: string) => (
+                            <span
+                              key={hp}
+                              className="px-2 py-0.5 rounded-full text-xs"
+                              style={{ backgroundColor: `${HONEYPOT_COLORS[hp]}20`, color: HONEYPOT_COLORS[hp] }}
+                            >
+                              {HONEYPOT_ICONS[hp]} {hp}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    ))}
+                    {(!threatIntel?.cross_honeypot_actors || threatIntel.cross_honeypot_actors.length === 0) && (
+                      <div className="p-8 text-center text-text-muted">
+                        No cross-honeypot attackers found
+                      </div>
+                    )}
+                  </div>
+                )
               )}
             </CardContent>
           </Card>

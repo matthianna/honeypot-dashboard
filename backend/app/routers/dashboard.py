@@ -94,48 +94,149 @@ async def get_top_attackers(
     _: str = Depends(get_current_user)
 ):
     """
-    Get top attackers across all honeypots.
+    Get top attackers across all honeypots with duration metrics.
     
     Aggregates attack data from all honeypots and returns the top
-    attacking IPs sorted by event count. Excludes internal/private IPs.
+    attacking IPs sorted by event count. Includes session duration
+    for human vs script detection. Excludes internal/private IPs.
     """
-    es = get_es_service()
-    ip_counts = {}
-    ip_geo = {}
+    from datetime import datetime
     
-    for _, index in es.INDICES.items():
-        top_ips = await es.get_top_source_ips(index, time_range, size=100)
-        
-        for ip_data in top_ips:
-            ip = ip_data["ip"]
+    es = get_es_service()
+    ip_data_map = {}  # ip -> {count, geo, sessions: [(first, last), ...]}
+    
+    # Index patterns with session field mappings
+    INDEX_SESSION_FIELDS = {
+        ".ds-cowrie-*": {"ip": "json.src_ip", "session": "json.session", "geo": "source.geo"},
+        "dionaea-*": {"ip": "source.ip", "session": None, "geo": "source.geo"},
+        ".ds-galah-*": {"ip": "source.ip", "session": "session.id", "geo": "source.geo"},
+        ".ds-rdpy-*": {"ip": "source.ip", "session": None, "geo": "source.geo"},
+        ".ds-heralding-*": {"ip": "source.ip", "session": "session_id", "geo": "source.geo"},
+    }
+    
+    for index, fields in INDEX_SESSION_FIELDS.items():
+        try:
+            # Query for top IPs with session aggregation
+            aggs = {
+                "top_ips": {
+                    "terms": {"field": fields["ip"], "size": 100},
+                    "aggs": {
+                        "geo": {
+                            "top_hits": {
+                                "size": 1,
+                                "_source": [f"{fields['geo']}.country_name", f"{fields['geo']}.city_name"]
+                            }
+                        },
+                        "first_seen": {"min": {"field": "@timestamp"}},
+                        "last_seen": {"max": {"field": "@timestamp"}}
+                    }
+                }
+            }
             
-            # Skip internal/private IPs
-            if is_internal_ip(ip):
-                continue
+            # Add session aggregation if available
+            if fields["session"]:
+                aggs["top_ips"]["aggs"]["sessions"] = {
+                    "terms": {"field": fields["session"], "size": 100},
+                    "aggs": {
+                        "first": {"min": {"field": "@timestamp"}},
+                        "last": {"max": {"field": "@timestamp"}}
+                    }
+                }
+            
+            result = await es.search(
+                index=index,
+                query=es._get_time_range_query(time_range),
+                size=0,
+                aggs=aggs
+            )
+            
+            for bucket in result.get("aggregations", {}).get("top_ips", {}).get("buckets", []):
+                ip = bucket["key"]
                 
-            count = ip_data["count"]
-            geo = ip_data.get("geo", {})
-            
-            if ip in ip_counts:
-                ip_counts[ip] += count
+                # Skip internal IPs
+                if is_internal_ip(ip):
+                    continue
+                
+                if ip not in ip_data_map:
+                    # Extract geo from top hit
+                    hits = bucket.get("geo", {}).get("hits", {}).get("hits", [])
+                    geo = {}
+                    if hits:
+                        source = hits[0].get("_source", {})
+                        # Handle nested geo field
+                        geo_data = source.get(fields["geo"].split(".")[0], {})
+                        if isinstance(geo_data, dict):
+                            geo_data = geo_data.get("geo", geo_data)
+                        geo = geo_data if isinstance(geo_data, dict) else {}
+                    
+                    ip_data_map[ip] = {
+                        "count": 0,
+                        "geo": geo,
+                        "sessions": []
+                    }
+                
+                ip_data_map[ip]["count"] += bucket["doc_count"]
+                
+                # Collect session durations
+                if fields["session"] and "sessions" in bucket:
+                    for sess_bucket in bucket["sessions"]["buckets"]:
+                        first = sess_bucket.get("first", {}).get("value_as_string")
+                        last = sess_bucket.get("last", {}).get("value_as_string")
+                        if first and last:
+                            ip_data_map[ip]["sessions"].append((first, last))
+                else:
+                    # Use overall first/last as a single "session"
+                    first = bucket.get("first_seen", {}).get("value_as_string")
+                    last = bucket.get("last_seen", {}).get("value_as_string")
+                    if first and last:
+                        ip_data_map[ip]["sessions"].append((first, last))
+                        
+        except Exception as e:
+            print(f"Error fetching {index}: {e}")
+            continue
+    
+    # Calculate duration metrics and classify behavior
+    attackers = []
+    for ip, data in ip_data_map.items():
+        session_durations = []
+        for first, last in data["sessions"]:
+            try:
+                first_dt = datetime.fromisoformat(first.replace("Z", "+00:00"))
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                duration = (last_dt - first_dt).total_seconds()
+                session_durations.append(duration)
+            except:
+                pass
+        
+        total_duration = sum(session_durations) if session_durations else None
+        session_count = len(session_durations) if session_durations else None
+        avg_duration = (total_duration / session_count) if session_count and total_duration else None
+        
+        # Classify behavior
+        behavior = None
+        if avg_duration is not None:
+            if avg_duration < 5:
+                behavior = "Script"
+            elif avg_duration > 60:
+                behavior = "Human"
             else:
-                ip_counts[ip] = count
-                ip_geo[ip] = geo
+                behavior = "Bot"
+        
+        attackers.append(TopAttacker(
+            ip=ip,
+            count=data["count"],
+            country=data["geo"].get("country_name"),
+            city=data["geo"].get("city_name"),
+            total_duration_seconds=round(total_duration, 2) if total_duration else None,
+            avg_session_duration=round(avg_duration, 2) if avg_duration else None,
+            session_count=session_count,
+            behavior_classification=behavior
+        ))
     
     # Sort by count and take top N
-    sorted_ips = sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+    attackers.sort(key=lambda x: x.count, reverse=True)
     
-    attackers = [
-        TopAttacker(
-            ip=ip,
-            count=count,
-            country=ip_geo.get(ip, {}).get("country_name"),
-            city=ip_geo.get(ip, {}).get("city_name")
-        )
-        for ip, count in sorted_ips
-    ]
-    
-    return TopAttackersResponse(data=attackers, time_range=time_range)
+    return TopAttackersResponse(data=attackers[:limit], time_range=time_range)
 
 
 @router.get("/timeline", response_model=TimelineResponse)
@@ -181,6 +282,55 @@ async def get_dashboard_timeline(
     ]
     
     return TimelineResponse(data=data, time_range=time_range)
+
+
+@router.get("/timeline-by-honeypot")
+async def get_timeline_by_honeypot(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get timeline data broken down by honeypot type.
+    
+    Returns event counts over time for each honeypot, suitable for stacked area charts.
+    """
+    es = get_es_service()
+    
+    # Determine interval based on time range
+    intervals = {
+        "1h": "5m",
+        "24h": "1h",
+        "7d": "6h",
+        "30d": "1d",
+    }
+    interval = intervals.get(time_range, "1h")
+    
+    # Collect timeline data per honeypot
+    result = {
+        "time_range": time_range,
+        "interval": interval,
+        "honeypots": {}
+    }
+    
+    honeypot_names = {
+        ".ds-cowrie-*": "cowrie",
+        "dionaea-*": "dionaea",
+        ".ds-galah-*": "galah",
+        ".ds-heralding-*": "heralding",
+        ".ds-rdpy-*": "rdpy",
+    }
+    
+    for index, name in honeypot_names.items():
+        try:
+            timeline = await es.get_timeline(index, time_range, interval)
+            result["honeypots"][name] = [
+                {"timestamp": point["timestamp"], "count": point["count"]}
+                for point in timeline
+            ]
+        except Exception:
+            result["honeypots"][name] = []
+    
+    return result
 
 
 @router.get("/geo-stats", response_model=GeoDistributionResponse)
@@ -411,7 +561,7 @@ async def get_threat_summary(
             query=es._get_time_range_query(time_range),
             size=0,
             aggs={
-                "by_event": {"terms": {"field": "cowrie.eventid.keyword", "size": 20}}
+                "by_event": {"terms": {"field": "json.eventid", "size": 20}}
             }
         )
         for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
@@ -478,7 +628,7 @@ async def get_mitre_coverage(
             query=es._get_time_range_query(time_range),
             size=0,
             aggs={
-                "by_event": {"terms": {"field": "cowrie.eventid.keyword", "size": 50}}
+                "by_event": {"terms": {"field": "json.eventid", "size": 50}}
             }
         )
         for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
@@ -636,7 +786,7 @@ async def get_threat_intel(
             index=es.INDICES["cowrie"],
             query=es._get_time_range_query(time_range),
             size=0,
-            aggs={"ips": {"terms": {"field": "cowrie.src_ip.keyword", "size": 500}}}
+            aggs={"ips": {"terms": {"field": "json.src_ip", "size": 500}}}
         )
         honeypot_ips["cowrie"] = {b["key"]: b["doc_count"] for b in result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
     except Exception:
@@ -750,7 +900,7 @@ async def get_top_threat_actors(
     # Get data from each honeypot
     honeypots = ["cowrie", "galah", "dionaea", "heralding", "rdpy"]
     ip_fields = {
-        "cowrie": "cowrie.src_ip.keyword",
+        "cowrie": "json.src_ip",
         "galah": "source.ip",
         "dionaea": "source.ip.keyword",
         "heralding": "source.ip",
@@ -802,3 +952,103 @@ async def get_top_threat_actors(
         "total_actors": len(threat_actors)
     }
 
+
+@router.get("/honeypot-health")
+async def get_honeypot_health(
+    _: str = Depends(get_current_user)
+):
+    """
+    Get health status of each honeypot - whether it's receiving data recently.
+    """
+    from datetime import datetime, timedelta
+    
+    es = get_es_service()
+    health_status = []
+    
+    honeypot_info = {
+        "cowrie": {"name": "Cowrie", "type": "SSH/Telnet", "color": "#39ff14"},
+        "dionaea": {"name": "Dionaea", "type": "Multi-protocol", "color": "#00d4ff"},
+        "galah": {"name": "Galah", "type": "Web/LLM", "color": "#ff6600"},
+        "heralding": {"name": "Heralding", "type": "Credential", "color": "#ff3366"},
+        "rdpy": {"name": "RDPY", "type": "RDP", "color": "#bf00ff"},
+        "firewall": {"name": "Firewall", "type": "Network", "color": "#ffff00"},
+    }
+    
+    for hp_key, info in honeypot_info.items():
+        try:
+            index = es.INDICES.get(hp_key, f".ds-{hp_key}-*")
+            
+            # Get last event and event counts for different time ranges
+            result = await es.search(
+                index=index,
+                query={"match_all": {}},
+                size=1,
+                sort=[{"@timestamp": "desc"}]
+            )
+            
+            last_event = None
+            hits = result.get("hits", {}).get("hits", [])
+            if hits:
+                last_event = hits[0]["_source"].get("@timestamp")
+            
+            # Count events in last hour and last 24 hours
+            events_1h = await es.get_total_events(index, "1h")
+            events_24h = await es.get_total_events(index, "24h")
+            
+            # Determine health status
+            if last_event:
+                try:
+                    last_dt = datetime.fromisoformat(last_event.replace("Z", "+00:00"))
+                    now = datetime.now(last_dt.tzinfo)
+                    minutes_ago = (now - last_dt).total_seconds() / 60
+                    
+                    if minutes_ago < 15:
+                        status = "healthy"
+                    elif minutes_ago < 60:
+                        status = "warning"
+                    else:
+                        status = "stale"
+                except:
+                    status = "unknown"
+                    minutes_ago = None
+            else:
+                status = "offline"
+                minutes_ago = None
+            
+            health_status.append({
+                "id": hp_key,
+                "name": info["name"],
+                "type": info["type"],
+                "color": info["color"],
+                "status": status,
+                "last_event": last_event,
+                "minutes_since_last": round(minutes_ago, 1) if minutes_ago else None,
+                "events_1h": events_1h,
+                "events_24h": events_24h,
+            })
+        except Exception as e:
+            health_status.append({
+                "id": hp_key,
+                "name": info["name"],
+                "type": info["type"],
+                "color": info["color"],
+                "status": "error",
+                "last_event": None,
+                "minutes_since_last": None,
+                "events_1h": 0,
+                "events_24h": 0,
+                "error": str(e),
+            })
+    
+    # Summary
+    healthy_count = sum(1 for h in health_status if h["status"] == "healthy")
+    total_count = len(health_status)
+    
+    return {
+        "honeypots": health_status,
+        "summary": {
+            "healthy": healthy_count,
+            "total": total_count,
+            "overall_status": "healthy" if healthy_count == total_count else ("warning" if healthy_count > 0 else "critical")
+        }
+    }

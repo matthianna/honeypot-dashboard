@@ -216,3 +216,80 @@ body {
   text-decoration: underline;
 }
 
+/* Slide-in animation for live feed */
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out forwards;
+}
+
+/* Attack marker ripple effect */
+@keyframes marker-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+.marker-ripple {
+  animation: marker-ripple 1.5s ease-out infinite;
+}
+
+/* Leaflet zoom controls dark theme */
+.leaflet-control-zoom {
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.leaflet-control-zoom a {
+  background-color: rgba(0, 0, 0, 0.7) !important;
+  color: #e0e0e0 !important;
+  border: none !important;
+  width: 36px !important;
+  height: 36px !important;
+  line-height: 36px !important;
+  font-size: 18px !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background-color: rgba(57, 255, 20, 0.2) !important;
+  color: var(--neon-green) !important;
+}
+
+.leaflet-control-zoom-in {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Hide default Leaflet attribution */
+.leaflet-control-attribution {
+  display: none;
+}
+
+/* Custom pulse animation for new attacks */
+@keyframes attack-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(57, 255, 20, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(57, 255, 20, 0);
+  }
+}
+
+.attack-new {
+  animation: attack-pulse 1s ease-in-out 3;
+}
+

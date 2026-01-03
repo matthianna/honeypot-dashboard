@@ -200,6 +200,44 @@ export default function AttackerModal({ ip, onClose }: AttackerModalProps) {
                 {/* Overview Tab */}
                 {activeTab === 'overview' && (
                   <div className="space-y-6">
+                    {/* Behavior Classification Banner */}
+                    {profile.behavior_classification && (
+                      <div className={`flex items-center justify-between p-4 rounded-lg ${
+                        profile.behavior_classification === 'Script' ? 'bg-neon-red/10 border border-neon-red/30' :
+                        profile.behavior_classification === 'Human' ? 'bg-neon-green/10 border border-neon-green/30' :
+                        'bg-neon-orange/10 border border-neon-orange/30'
+                      }`}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">
+                            {profile.behavior_classification === 'Script' ? '⚡' :
+                             profile.behavior_classification === 'Human' ? '👤' : '🤖'}
+                          </span>
+                          <div>
+                            <div className={`font-display font-bold ${
+                              profile.behavior_classification === 'Script' ? 'text-neon-red' :
+                              profile.behavior_classification === 'Human' ? 'text-neon-green' :
+                              'text-neon-orange'
+                            }`}>
+                              {profile.behavior_classification} Attack Pattern
+                            </div>
+                            <div className="text-xs text-text-secondary">
+                              {profile.behavior_classification === 'Script' 
+                                ? 'Fast automated attacks (<5s avg session)'
+                                : profile.behavior_classification === 'Human'
+                                ? 'Interactive exploration (>60s avg session)'
+                                : 'Automated with some interaction (5-60s avg)'}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-lg font-mono text-text-primary">
+                            {profile.avg_session_duration ? `${profile.avg_session_duration.toFixed(1)}s` : 'N/A'}
+                          </div>
+                          <div className="text-xs text-text-secondary">avg session</div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Stats Grid */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       <div className="bg-bg-card rounded-lg p-3">
@@ -209,11 +247,33 @@ export default function AttackerModal({ ip, onClose }: AttackerModalProps) {
                         </div>
                       </div>
                       <div className="bg-bg-card rounded-lg p-3">
-                        <div className="text-xs text-text-secondary mb-1">Countries</div>
+                        <div className="text-xs text-text-secondary mb-1">Sessions</div>
                         <div className="text-xl font-display font-bold text-neon-blue">
+                          {profile.session_count || 0}
+                        </div>
+                      </div>
+                      <div className="bg-bg-card rounded-lg p-3">
+                        <div className="text-xs text-text-secondary mb-1">Total Duration</div>
+                        <div className="text-xl font-display font-bold text-neon-orange">
+                          {profile.total_duration_seconds 
+                            ? profile.total_duration_seconds < 60 
+                              ? `${Math.round(profile.total_duration_seconds)}s`
+                              : profile.total_duration_seconds < 3600
+                              ? `${Math.round(profile.total_duration_seconds / 60)}m`
+                              : `${(profile.total_duration_seconds / 3600).toFixed(1)}h`
+                            : 'N/A'}
+                        </div>
+                      </div>
+                      <div className="bg-bg-card rounded-lg p-3">
+                        <div className="text-xs text-text-secondary mb-1">Countries</div>
+                        <div className="text-xl font-display font-bold text-neon-purple">
                           {profile.countries.length}
                         </div>
                       </div>
+                    </div>
+
+                    {/* Time Range */}
+                    <div className="grid grid-cols-2 gap-4">
                       <div className="bg-bg-card rounded-lg p-3">
                         <div className="text-xs text-text-secondary mb-1">First Seen</div>
                         <div className="text-sm text-text-primary">
@@ -269,7 +329,20 @@ export default function AttackerModal({ ip, onClose }: AttackerModalProps) {
                                   className="w-3 h-3 rounded-full"
                                   style={{ backgroundColor: color }}
                                 />
-                                <span className="text-text-primary">{name}</span>
+                                <div>
+                                  <span className="text-text-primary">{name}</span>
+                                  {activity.session_count && activity.duration_seconds && (
+                                    <div className="text-xs text-text-secondary">
+                                      {activity.session_count} sessions · {
+                                        activity.duration_seconds < 60 
+                                          ? `${Math.round(activity.duration_seconds)}s`
+                                          : activity.duration_seconds < 3600
+                                          ? `${Math.round(activity.duration_seconds / 60)}m`
+                                          : `${(activity.duration_seconds / 3600).toFixed(1)}h`
+                                      } total
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                               <div className="text-right">
                                 <div className="font-mono" style={{ color }}>

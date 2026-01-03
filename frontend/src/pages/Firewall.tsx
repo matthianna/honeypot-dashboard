@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { BarChart2, Clock, Map, ShieldAlert, Scan, Users, Server, List, Filter, Eye, Globe, TrendingUp, FileText } from 'lucide-react';
+import { BarChart2, Clock, Map, ShieldAlert, Scan, Users, Server, List, Filter, Eye, Globe } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -11,9 +11,6 @@ import {
   PieChart,
   Pie,
   Cell,
-  BarChart,
-  Bar,
-  Legend,
 } from 'recharts';
 import Card, { CardHeader, CardContent } from '../components/Card';
 import StatsCard from '../components/StatsCard';
@@ -24,6 +21,7 @@ import IPLink from '../components/IPLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import RawLogModal from '../components/RawLogModal';
 import FirewallAttackMap from '../components/FirewallAttackMap';
+import UnexposedPortsAnalysis from '../components/UnexposedPortsAnalysis';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
 import api from '../services/api';
@@ -83,35 +81,7 @@ export default function Firewall() {
     [timeRange]
   );
 
-  const { data: ruleStats, loading: ruleStatsLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallRuleStats(timeRange), [timeRange]),
-    [timeRange]
-  );
 
-  const { data: actionTimeline, loading: actionTimelineLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallActionTimeline(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: directionStats, loading: directionStatsLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallDirectionStats(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: tcpFlags, loading: tcpFlagsLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallTcpFlags(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: ttlAnalysis, loading: ttlAnalysisLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallTtlAnalysis(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: packetSizes, loading: packetSizesLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallPacketSizes(timeRange), [timeRange]),
-    [timeRange]
-  );
 
   const formatTimestamp = (timestamp: string) => {
     try {
@@ -565,355 +535,6 @@ export default function Firewall() {
       ),
     },
     {
-      id: 'analytics',
-      label: 'Analytics',
-      icon: <TrendingUp className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* Action Timeline */}
-          <Card>
-            <CardHeader 
-              title="Block vs Pass Actions Over Time" 
-              subtitle={`Total: Block ${actionTimeline?.totals?.block?.toLocaleString() || 0} | Pass ${actionTimeline?.totals?.pass?.toLocaleString() || 0}`}
-              icon={<ShieldAlert className="w-5 h-5" />} 
-            />
-            <CardContent>
-              {actionTimelineLoading ? (
-                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={actionTimeline?.timeline || []}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                      <XAxis 
-                        dataKey="timestamp" 
-                        tickFormatter={(ts) => new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-                        stroke="#888888"
-                        tick={{ fill: '#888888', fontSize: 10 }}
-                      />
-                      <YAxis stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#1a1a25',
-                          border: '1px solid #252532',
-                          borderRadius: '8px',
-                          color: '#e0e0e0',
-                        }}
-                        labelFormatter={(ts) => new Date(ts).toLocaleString()}
-                      />
-                      <Legend />
-                      <Area type="monotone" dataKey="block" name="Blocked" stroke="#ff3366" fill="#ff3366" fillOpacity={0.5} stackId="1" />
-                      <Area type="monotone" dataKey="pass" name="Passed" stroke="#39ff14" fill="#39ff14" fillOpacity={0.5} stackId="1" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Direction Stats */}
-            <Card>
-              <CardHeader title="Traffic Direction Breakdown" subtitle="Inbound vs Outbound traffic" icon={<Filter className="w-5 h-5" />} />
-              <CardContent>
-                {directionStatsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-4">
-                    {directionStats?.directions?.map((d) => (
-                      <div key={d.direction} className="bg-bg-secondary rounded-lg p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="font-medium text-text-primary capitalize">{d.direction}</span>
-                          <span className="font-mono text-neon-yellow">{d.count.toLocaleString()}</span>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-sm">
-                          <div className="text-center">
-                            <div className="text-neon-red font-bold">{d.block_count.toLocaleString()}</div>
-                            <div className="text-text-muted text-xs">Blocked</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-neon-green font-bold">{d.pass_count.toLocaleString()}</div>
-                            <div className="text-text-muted text-xs">Passed</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-neon-blue font-bold">{d.unique_sources.toLocaleString()}</div>
-                            <div className="text-text-muted text-xs">Sources</div>
-                          </div>
-                        </div>
-                        <div className="flex gap-1 mt-2">
-                          {d.top_ports.slice(0, 5).map((port) => (
-                            <span key={port} className="px-2 py-0.5 bg-bg-primary rounded text-xs font-mono">{port}</span>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Rule Stats */}
-            <Card>
-              <CardHeader 
-                title="Firewall Rule Triggers" 
-                subtitle={`${ruleStats?.total_rules || 0} unique rules triggered`}
-                icon={<FileText className="w-5 h-5" />} 
-              />
-              <CardContent>
-                {ruleStatsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={ruleStats?.rules?.slice(0, 8) || []} layout="vertical">
-                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                        <XAxis type="number" stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                        <YAxis 
-                          type="category" 
-                          dataKey="rule" 
-                          stroke="#888888" 
-                          tick={{ fill: '#888888', fontSize: 9 }} 
-                          width={80}
-                          tickFormatter={(v) => v.length > 10 ? `${v.slice(0, 10)}...` : v}
-                        />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: '#1a1a25',
-                            border: '1px solid #252532',
-                            borderRadius: '8px',
-                            color: '#e0e0e0',
-                          }}
-                        />
-                        <Legend />
-                        <Bar dataKey="block_count" name="Block" fill="#ff3366" stackId="a" />
-                        <Bar dataKey="pass_count" name="Pass" fill="#39ff14" stackId="a" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-      ),
-    },
-    {
-      id: 'packet-analysis',
-      label: 'Packet Analysis',
-      icon: <Scan className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* TCP Flags and Scan Detection */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader 
-                title="Scan Type Detection" 
-                subtitle={`${tcpFlags?.total_tcp_packets?.toLocaleString() || 0} TCP packets analyzed`}
-                icon={<Scan className="w-5 h-5" />}
-              />
-              <CardContent>
-                {tcpFlagsLoading ? (
-                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="h-48">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={tcpFlags?.scan_types || []}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={40}
-                          outerRadius={70}
-                          paddingAngle={2}
-                          dataKey="count"
-                          nameKey="scan_type"
-                        >
-                          {tcpFlags?.scan_types?.map((_, index) => (
-                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: '#1a1a25',
-                            border: '1px solid #252532',
-                            borderRadius: '8px',
-                            color: '#e0e0e0',
-                          }}
-                          formatter={(value: number, name: string) => [value.toLocaleString(), name]}
-                        />
-                        <Legend />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader 
-                title="IP Flags Distribution" 
-                subtitle="DF (Don't Fragment) vs none"
-              />
-              <CardContent>
-                {tcpFlagsLoading ? (
-                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-3">
-                    {tcpFlags?.flags?.slice(0, 6).map((item, index) => (
-                      <div key={item.flag || 'empty'} className="flex items-center justify-between p-3 bg-bg-secondary rounded-lg">
-                        <div className="flex items-center">
-                          <div 
-                            className="w-3 h-3 rounded-full mr-3"
-                            style={{ backgroundColor: COLORS[index % COLORS.length] }}
-                          />
-                          <span className="font-mono text-text-primary">{item.flag || '(none)'}</span>
-                        </div>
-                        <span className="font-mono text-neon-green">{item.count.toLocaleString()}</span>
-                      </div>
-                    ))}
-                    {(!tcpFlags?.flags || tcpFlags.flags.length === 0) && (
-                      <div className="text-center py-4 text-text-secondary text-sm">No flag data available</div>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* OS Fingerprinting via TTL */}
-          <Card>
-            <CardHeader 
-              title="OS Fingerprinting (TTL Analysis)" 
-              subtitle={`${ttlAnalysis?.total_packets?.toLocaleString() || 0} packets with TTL info`}
-              icon={<Server className="w-5 h-5" />}
-            />
-            <CardContent>
-              {ttlAnalysisLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {/* OS Distribution */}
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">Estimated Source OS</h4>
-                    <div className="h-48">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={ttlAnalysis?.os_fingerprints || []}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={40}
-                            outerRadius={70}
-                            paddingAngle={2}
-                            dataKey="count"
-                            nameKey="os"
-                          >
-                            {ttlAnalysis?.os_fingerprints?.map((_, index) => (
-                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#1a1a25',
-                              border: '1px solid #252532',
-                              borderRadius: '8px',
-                              color: '#e0e0e0',
-                            }}
-                            formatter={(value: number, name: string) => [value.toLocaleString(), name]}
-                          />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  {/* TTL Distribution */}
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">TTL Values Observed</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {ttlAnalysis?.ttl_distribution?.slice(0, 10).map((item) => (
-                        <div key={item.ttl} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono text-neon-blue">TTL {item.ttl}</span>
-                            <span className="text-xs text-text-muted">→ ~{item.estimated_hops} hops</span>
-                            <span className="px-2 py-0.5 text-xs rounded bg-neon-purple/20 text-neon-purple">{item.os_guess}</span>
-                          </div>
-                          <span className="font-mono text-neon-green">{item.count.toLocaleString()}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Packet Size Distribution */}
-          <Card>
-            <CardHeader 
-              title="Packet Size Distribution" 
-              subtitle={`Avg: ${packetSizes?.stats?.avg || 0} bytes | Min: ${packetSizes?.stats?.min || 0} | Max: ${packetSizes?.stats?.max || 0}`}
-            />
-            <CardContent>
-              {packetSizesLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {/* Histogram */}
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">Size Histogram</h4>
-                    <div className="h-48">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={packetSizes?.histogram?.slice(0, 12) || []}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                          <XAxis 
-                            dataKey="range" 
-                            stroke="#888888" 
-                            tick={{ fill: '#888888', fontSize: 9 }}
-                            angle={-45}
-                            textAnchor="end"
-                            height={50}
-                          />
-                          <YAxis stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#1a1a25',
-                              border: '1px solid #252532',
-                              borderRadius: '8px',
-                              color: '#e0e0e0',
-                            }}
-                          />
-                          <Bar dataKey="count" fill="#ffff00" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  {/* Common Sizes */}
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">Most Common Sizes</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {packetSizes?.common_sizes?.slice(0, 10).map((item) => (
-                        <div key={item.size} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-neon-yellow">{item.size} bytes</span>
-                            {item.meaning && (
-                              <span className="text-xs text-text-muted">({item.meaning})</span>
-                            )}
-                          </div>
-                          <span className="font-mono text-neon-green">{item.count.toLocaleString()}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      ),
-    },
-    {
       id: 'attack-map',
       label: 'Attack Map',
       icon: <Globe className="w-4 h-4" />,
@@ -931,6 +552,12 @@ export default function Firewall() {
           </Card>
         </div>
       ),
+    },
+    {
+      id: 'unexposed',
+      label: 'Unexposed Ports',
+      icon: <Eye className="w-4 h-4" />,
+      content: <UnexposedPortsAnalysis timeRange={timeRange} />,
     },
   ];
 

@@ -1,16 +1,20 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useMemo } from 'react';
 import {
   BarChart2,
   Clock,
   Map,
   Terminal,
   Key,
-  Fingerprint,
   GitCompare,
   TrendingUp,
   CheckCircle,
   XCircle,
   Eye,
+  Filter,
+  Users,
+  Bot,
+  Zap,
+  Shield,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -41,13 +45,13 @@ import { CowriePortsOverview } from '../components/HoneypotPorts';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
 import api from '../services/api';
-import type { CowrieSession, CowrieCredential, CowrieHassh, GeoPoint } from '../types';
+import type { CowrieSession, CowrieCredential, GeoPoint } from '../types';
 
 const COLORS = ['#39ff14', '#00d4ff', '#ff6600', '#bf00ff', '#ff3366'];
 const VARIANT_COLORS: Record<string, string> = {
   'plain': '#39ff14',
-  'llm': '#00d4ff',
-  'openai': '#ff6600',
+  'openai': '#00d4ff',
+  'ollama': '#bf00ff',
 };
 
 interface VariantData {
@@ -85,6 +89,7 @@ interface ComparisonData {
     p90: number;
     p99: number;
   };
+  top_commands: Array<{ command: string; count: number }>;
   timeline: Array<{ timestamp: string; count: number }>;
 }
 
@@ -92,6 +97,11 @@ export default function Cowrie() {
   const { timeRange, setTimeRange } = useTimeRange('24h');
   const [selectedVariant, setSelectedVariant] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  
+  // Session filter states
+  const [sessionMinDuration, setSessionMinDuration] = useState<number | null>(null);
+  const [sessionVariantFilter, setSessionVariantFilter] = useState<string>('all');
+  const [sessionHasCommands, setSessionHasCommands] = useState<boolean | null>(null);
 
   const { data: stats, loading: statsLoading } = useApiWithRefresh(
     useCallback(() => api.getCowrieStats(timeRange), [timeRange]),
@@ -108,8 +118,20 @@ export default function Cowrie() {
     [timeRange]
   );
 
+  // Build session filter options
+  const sessionFilterOptions = useMemo(() => ({
+    minDuration: sessionMinDuration ?? undefined,
+    variant: sessionVariantFilter !== 'all' ? sessionVariantFilter : undefined,
+    hasCommands: sessionHasCommands ?? undefined,
+  }), [sessionMinDuration, sessionVariantFilter, sessionHasCommands]);
+
   const { data: sessions, loading: sessionsLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieSessions(timeRange, 50), [timeRange]),
+    useCallback(() => api.getCowrieSessions(timeRange, 100, sessionFilterOptions), [timeRange, sessionFilterOptions]),
+    [timeRange, sessionFilterOptions]
+  );
+
+  const { data: interestingSessions } = useApiWithRefresh(
+    useCallback(() => api.getCowrieInterestingSessions(timeRange, 5, 50), [timeRange]),
     [timeRange]
   );
 
@@ -123,11 +145,6 @@ export default function Cowrie() {
     [timeRange]
   );
 
-  const { data: hassh, loading: hasshLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieHashh(timeRange, 20), [timeRange]),
-    [timeRange]
-  );
-
   const { data: variantsData, loading: variantsLoading } = useApiWithRefresh(
     useCallback(() => api.getCowrieVariants(timeRange), [timeRange]),
     [timeRange]
@@ -138,33 +155,8 @@ export default function Cowrie() {
     [timeRange]
   );
 
-  const { data: loginAnalysis, loading: loginAnalysisLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieLoginAnalysis(timeRange), [timeRange]),
-    [timeRange]
-  );
-
   const { data: sessionDurations, loading: sessionDurationsLoading } = useApiWithRefresh(
     useCallback(() => api.getCowrieSessionDurations(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: attackFunnel, loading: attackFunnelLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieAttackFunnel(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: credentialReuse, loading: credentialReuseLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieCredentialReuse(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: clientFingerprints, loading: clientFingerprintsLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieClientFingerprints(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: weakAlgorithms, loading: weakAlgorithmsLoading } = useApiWithRefresh(
-    useCallback(() => api.getCowrieWeakAlgorithms(timeRange), [timeRange]),
     [timeRange]
   );
 
@@ -350,11 +342,159 @@ export default function Cowrie() {
           </Card>
 
           <Card>
-            <CardHeader title="Recent Sessions" icon={<Terminal className="w-5 h-5" />} />
-            <CardContent className="p-0">
+            <CardHeader 
+              title="Sessions" 
+              subtitle={sessionMinDuration ? `Filtered: ≥${sessionMinDuration}s duration` : undefined}
+              icon={<Terminal className="w-5 h-5" />} 
+            />
+            <CardContent>
+              {/* Filter Controls */}
+              <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-bg-secondary rounded-lg">
+                <div className="flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-text-muted" />
+                  <span className="text-sm text-text-secondary">Filters:</span>
+                </div>
+                
+                {/* Duration Filter */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-text-muted">Min Duration:</label>
+                  <select
+                    value={sessionMinDuration ?? ''}
+                    onChange={(e) => setSessionMinDuration(e.target.value ? Number(e.target.value) : null)}
+                    className="bg-bg-card border border-bg-hover rounded px-2 py-1 text-sm text-text-primary focus:outline-none focus:border-neon-green"
+                  >
+                    <option value="">All</option>
+                    <option value="5">≥5s (Potential Bots)</option>
+                    <option value="30">≥30s (Interactive)</option>
+                    <option value="60">≥1m (Human)</option>
+                    <option value="300">≥5m (Deep Interaction)</option>
+                  </select>
+                </div>
+                
+                {/* Variant Filter */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-text-muted">Variant:</label>
+                  <select
+                    value={sessionVariantFilter}
+                    onChange={(e) => setSessionVariantFilter(e.target.value)}
+                    className="bg-bg-card border border-bg-hover rounded px-2 py-1 text-sm text-text-primary focus:outline-none focus:border-neon-green"
+                  >
+                    <option value="all">All</option>
+                    <option value="plain">Plain</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+                
+                {/* Commands Filter */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-text-muted">Commands:</label>
+                  <select
+                    value={sessionHasCommands === null ? '' : sessionHasCommands ? 'yes' : 'no'}
+                    onChange={(e) => setSessionHasCommands(e.target.value === '' ? null : e.target.value === 'yes')}
+                    className="bg-bg-card border border-bg-hover rounded px-2 py-1 text-sm text-text-primary focus:outline-none focus:border-neon-green"
+                  >
+                    <option value="">All</option>
+                    <option value="yes">With Commands</option>
+                    <option value="no">No Commands</option>
+                  </select>
+                </div>
+                
+                {/* Reset Button */}
+                {(sessionMinDuration !== null || sessionVariantFilter !== 'all' || sessionHasCommands !== null) && (
+                  <button
+                    onClick={() => {
+                      setSessionMinDuration(null);
+                      setSessionVariantFilter('all');
+                      setSessionHasCommands(null);
+                    }}
+                    className="text-xs text-neon-red hover:underline"
+                  >
+                    Reset Filters
+                  </button>
+                )}
+                
+                <div className="ml-auto text-xs text-text-muted">
+                  {sessions?.length || 0} sessions
+                </div>
+              </div>
+              
               <DataTable columns={sessionColumns} data={sessions || []} loading={sessionsLoading} emptyMessage="No sessions found" />
             </CardContent>
           </Card>
+          
+          {/* Interesting Sessions Summary */}
+          {interestingSessions && interestingSessions.stats.total_interesting > 0 && (
+            <Card>
+              <CardHeader 
+                title="Interesting Sessions (≥5s)" 
+                subtitle="Likely human attackers vs automated scripts"
+                icon={<Users className="w-5 h-5" />} 
+              />
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div className="bg-bg-secondary rounded-lg p-3 text-center">
+                    <div className="text-2xl font-display font-bold text-neon-green">{interestingSessions.stats.total_interesting}</div>
+                    <div className="text-xs text-text-secondary">Total Sessions ≥5s</div>
+                  </div>
+                  <div className="bg-bg-secondary rounded-lg p-3 text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <Users className="w-4 h-4 text-neon-purple" />
+                      <span className="text-2xl font-display font-bold text-neon-purple">{interestingSessions.stats.human_count}</span>
+                    </div>
+                    <div className="text-xs text-text-secondary">Human (≥60s)</div>
+                  </div>
+                  <div className="bg-bg-secondary rounded-lg p-3 text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <Bot className="w-4 h-4 text-neon-orange" />
+                      <span className="text-2xl font-display font-bold text-neon-orange">{interestingSessions.stats.bot_count}</span>
+                    </div>
+                    <div className="text-xs text-text-secondary">Bot (5-60s)</div>
+                  </div>
+                  <div className="bg-bg-secondary rounded-lg p-3 text-center">
+                    <div className="text-2xl font-display font-bold text-neon-blue">{formatDuration(interestingSessions.stats.avg_duration)}</div>
+                    <div className="text-xs text-text-secondary">Avg Duration</div>
+                  </div>
+                </div>
+                
+                {/* Top 5 longest sessions */}
+                <div className="space-y-2">
+                  <h4 className="text-sm font-medium text-text-secondary">Longest Sessions</h4>
+                  {interestingSessions.sessions.slice(0, 5).map((session) => (
+                    <div 
+                      key={session.session_id}
+                      className="flex items-center justify-between p-3 bg-bg-secondary rounded-lg hover:bg-bg-hover transition-colors cursor-pointer"
+                      onClick={() => setSelectedSessionId(session.session_id)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          session.behavior === 'Human' ? 'bg-neon-purple/20 text-neon-purple' :
+                          session.behavior === 'Bot' ? 'bg-neon-orange/20 text-neon-orange' :
+                          'bg-bg-hover text-text-muted'
+                        }`}>
+                          {session.behavior === 'Human' && <Users className="w-3 h-3 inline mr-1" />}
+                          {session.behavior === 'Bot' && <Bot className="w-3 h-3 inline mr-1" />}
+                          {session.behavior === 'Script' && <Zap className="w-3 h-3 inline mr-1" />}
+                          {session.behavior}
+                        </span>
+                        <IPLink ip={session.src_ip} />
+                        <span className="text-xs text-text-muted">{session.country || 'Unknown'}</span>
+                        {session.variant && (
+                          <span className="text-xs" style={{ color: VARIANT_COLORS[session.variant] || '#888' }}>
+                            {session.variant}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-lg font-bold text-neon-green">{formatDuration(session.duration)}</span>
+                        <Eye className="w-4 h-4 text-text-muted" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </div>
       ),
     },
@@ -558,6 +698,42 @@ export default function Cowrie() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Top Commands Per Variant */}
+          <Card>
+            <CardHeader title="Top Commands by Variant" subtitle="Most frequent commands executed on each honeypot variant" icon={<Terminal className="w-5 h-5" />} />
+            <CardContent>
+              {comparisonLoading ? (
+                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {comparison.map(c => (
+                    <div key={c.variant} className="bg-bg-secondary rounded-lg p-4">
+                      <div className="flex items-center gap-2 mb-4 pb-2 border-b border-bg-hover">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: VARIANT_COLORS[c.variant] }} />
+                        <span className="font-medium text-text-primary">{c.display_name}</span>
+                        <span className="ml-auto text-sm text-text-muted">{c.metrics.commands_executed.toLocaleString()} total</span>
+                      </div>
+                      <div className="space-y-2 max-h-64 overflow-y-auto">
+                        {(c.top_commands || []).length === 0 ? (
+                          <div className="text-center py-4 text-text-muted text-sm">No commands recorded</div>
+                        ) : (
+                          (c.top_commands || []).map((cmd: { command: string; count: number }, idx: number) => (
+                            <div key={idx} className="flex items-start justify-between gap-2 py-1">
+                              <code className="font-mono text-xs text-neon-green break-all flex-1" title={cmd.command}>
+                                {cmd.command.length > 60 ? cmd.command.slice(0, 60) + '...' : cmd.command || '(empty)'}
+                              </code>
+                              <span className="font-mono text-xs text-text-muted whitespace-nowrap">{cmd.count}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       ),
     },
@@ -705,94 +881,39 @@ export default function Cowrie() {
       ),
     },
     {
-      id: 'hassh',
-      label: 'HASSH',
-      icon: <Fingerprint className="w-4 h-4" />,
-      content: (
-        <Card>
-          <CardHeader title="SSH Fingerprints (HASSH)" subtitle="Client identification via SSH algorithm negotiation" />
-          <CardContent>
-            {hasshLoading ? (
-              <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <div className="space-y-3">
-                {hassh?.map((item: CowrieHassh) => (
-                  <div key={item.hassh} className="flex items-center justify-between p-3 bg-bg-secondary rounded-lg">
-                    <div>
-                      <div className="font-mono text-sm text-neon-blue">{item.hassh}</div>
-                      {item.client_version && <div className="text-xs text-text-secondary mt-1">{item.client_version}</div>}
-                    </div>
-                    <span className="font-mono text-neon-green">{item.count.toLocaleString()}</span>
-                  </div>
-                ))}
-                {(!hassh || hassh.length === 0) && <div className="text-center py-8 text-text-secondary">No HASSH fingerprints found</div>}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ),
-    },
-    {
-      id: 'analytics',
-      label: 'Analytics',
-      icon: <TrendingUp className="w-4 h-4" />,
+      id: 'mitre',
+      label: 'MITRE ATT&CK',
+      icon: <Shield className="w-4 h-4" />,
       content: (
         <div className="space-y-6">
-          {/* Attack Funnel */}
+          {/* Session Duration Distribution */}
           <Card>
-            <CardHeader title="Attack Progression Funnel" subtitle="How attackers progress through stages" />
+            <CardHeader title="Session Duration Distribution" subtitle="How long attackers stay connected" icon={<Clock className="w-5 h-5" />} />
             <CardContent>
-              {attackFunnelLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+              {sessionDurationsLoading ? (
+                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
               ) : (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-4 gap-4">
-                    {attackFunnel?.funnel?.map((stage, index) => (
-                      <div key={stage.stage} className="text-center">
-                        <div className="relative">
-                          <div 
-                            className="mx-auto rounded-lg p-4"
-                            style={{ 
-                              backgroundColor: `rgba(57, 255, 20, ${0.1 + (0.2 * (attackFunnel.funnel.length - index) / attackFunnel.funnel.length)})`,
-                              width: `${100 - index * 15}%`
-                            }}
-                          >
-                            <div className="text-2xl font-display font-bold text-neon-green">{stage.count.toLocaleString()}</div>
-                            <div className="text-xs text-text-secondary mt-1">{stage.stage}</div>
-                            <div className="text-xs text-neon-blue mt-1">{stage.percentage}%</div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
+                <>
+                  <div className="grid grid-cols-3 gap-2 mb-4 text-center">
+                    <div className="bg-bg-secondary rounded-lg p-2">
+                      <div className="text-xs text-text-secondary">Avg</div>
+                      <div className="text-lg font-bold text-neon-blue">{sessionDurations?.stats?.avg_duration || 0}s</div>
+                    </div>
+                    <div className="bg-bg-secondary rounded-lg p-2">
+                      <div className="text-xs text-text-secondary">Median</div>
+                      <div className="text-lg font-bold text-neon-green">{Math.round(sessionDurations?.stats?.percentiles?.['50.0'] || 0)}s</div>
+                    </div>
+                    <div className="bg-bg-secondary rounded-lg p-2">
+                      <div className="text-xs text-text-secondary">Max</div>
+                      <div className="text-lg font-bold text-neon-orange">{sessionDurations?.stats?.max_duration || 0}s</div>
+                    </div>
                   </div>
-                  <div className="text-center text-text-secondary text-sm">
-                    Total Unique Sessions: <span className="text-neon-green font-bold">{attackFunnel?.total_sessions?.toLocaleString() || 0}</span>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Login Analysis by Sensor */}
-            <Card>
-              <CardHeader title="Login Success/Failure by Sensor" subtitle="Compare Plain vs LLM effectiveness" />
-              <CardContent>
-                {loginAnalysisLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="h-64">
+                  <div className="h-48">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={loginAnalysis?.sensors || []} layout="vertical">
+                      <BarChart data={sessionDurations?.ranges || []}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                        <XAxis type="number" stroke="#888888" tick={{ fill: '#888888', fontSize: 12 }} />
-                        <YAxis 
-                          type="category" 
-                          dataKey="sensor" 
-                          stroke="#888888" 
-                          tick={{ fill: '#888888', fontSize: 11 }} 
-                          width={100}
-                        />
+                        <XAxis dataKey="range" stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
+                        <YAxis stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
                         <Tooltip
                           contentStyle={{
                             backgroundColor: '#1a1a25',
@@ -801,272 +922,9 @@ export default function Cowrie() {
                             color: '#e0e0e0',
                           }}
                         />
-                        <Legend />
-                        <Bar dataKey="success" name="Success" fill="#39ff14" stackId="a" />
-                        <Bar dataKey="failed" name="Failed" fill="#ff3366" stackId="a" />
+                        <Bar dataKey="count" fill="#00d4ff" radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Session Duration Distribution */}
-            <Card>
-              <CardHeader title="Session Duration Distribution" subtitle="How long attackers stay connected" />
-              <CardContent>
-                {sessionDurationsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <>
-                    <div className="grid grid-cols-3 gap-2 mb-4 text-center">
-                      <div className="bg-bg-secondary rounded-lg p-2">
-                        <div className="text-xs text-text-secondary">Avg</div>
-                        <div className="text-lg font-bold text-neon-blue">{sessionDurations?.stats?.avg_duration || 0}s</div>
-                      </div>
-                      <div className="bg-bg-secondary rounded-lg p-2">
-                        <div className="text-xs text-text-secondary">Median</div>
-                        <div className="text-lg font-bold text-neon-green">{Math.round(sessionDurations?.stats?.percentiles?.['50.0'] || 0)}s</div>
-                      </div>
-                      <div className="bg-bg-secondary rounded-lg p-2">
-                        <div className="text-xs text-text-secondary">Max</div>
-                        <div className="text-lg font-bold text-neon-orange">{sessionDurations?.stats?.max_duration || 0}s</div>
-                      </div>
-                    </div>
-                    <div className="h-48">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={sessionDurations?.ranges || []}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                          <XAxis dataKey="range" stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                          <YAxis stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#1a1a25',
-                              border: '1px solid #252532',
-                              borderRadius: '8px',
-                              color: '#e0e0e0',
-                            }}
-                          />
-                          <Bar dataKey="count" fill="#00d4ff" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Credential Reuse Analysis */}
-          <Card>
-            <CardHeader title="Credential Reuse Analysis" subtitle="Most commonly attempted passwords and usernames" />
-            <CardContent>
-              {credentialReuseLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">Top Passwords Attempted</h4>
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                      {credentialReuse?.top_passwords?.map((item, index) => (
-                        <div key={item.password} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                          <div className="flex items-center">
-                            <span className="w-6 text-text-muted text-xs">{index + 1}.</span>
-                            <span className="font-mono text-neon-red">{item.password}</span>
-                          </div>
-                          <span className="font-mono text-neon-green text-sm">{item.count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-medium text-text-secondary mb-3">Top Usernames Attempted</h4>
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                      {credentialReuse?.top_usernames?.map((item, index) => (
-                        <div key={item.username} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                          <div className="flex items-center">
-                            <span className="w-6 text-text-muted text-xs">{index + 1}.</span>
-                            <span className="font-mono text-neon-blue">{item.username}</span>
-                          </div>
-                          <span className="font-mono text-neon-green text-sm">{item.count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      ),
-    },
-    {
-      id: 'fingerprinting',
-      label: 'SSH Fingerprinting',
-      icon: <Fingerprint className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* SSH Client Tools Distribution */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader 
-                title="SSH Client Tools" 
-                subtitle="Attack tools identified by version strings"
-              />
-              <CardContent>
-                {clientFingerprintsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <>
-                    <div className="mb-4 p-3 bg-bg-secondary rounded-lg flex items-center justify-between">
-                      <span className="text-sm text-text-secondary">Unique Fingerprints</span>
-                      <span className="font-mono text-lg text-neon-green font-bold">{clientFingerprints?.unique_fingerprints || 0}</span>
-                    </div>
-                    <div className="h-48">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={clientFingerprints?.tools?.slice(0, 6) || []}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={40}
-                            outerRadius={70}
-                            paddingAngle={2}
-                            dataKey="count"
-                            nameKey="tool"
-                          >
-                            {clientFingerprints?.tools?.slice(0, 6).map((_, index) => (
-                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#1a1a25',
-                              border: '1px solid #252532',
-                              borderRadius: '8px',
-                              color: '#e0e0e0',
-                            }}
-                            formatter={(value: number, name: string) => [value.toLocaleString(), name]}
-                          />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader 
-                title="SSH Version Strings" 
-                subtitle="Raw version strings from clients"
-              />
-              <CardContent>
-                {clientFingerprintsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-2 max-h-72 overflow-y-auto">
-                    {clientFingerprints?.versions?.slice(0, 15).map((item, index) => (
-                      <div key={item.version} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                        <div className="flex-1 min-w-0">
-                          <span className="text-xs text-text-muted mr-2">{index + 1}.</span>
-                          <span className="font-mono text-sm text-text-primary truncate">{item.version}</span>
-                          <span className="ml-2 px-2 py-0.5 rounded text-xs bg-neon-blue/20 text-neon-blue">{item.tool}</span>
-                        </div>
-                        <span className="font-mono text-neon-green ml-2">{item.count}</span>
-                      </div>
-                    ))}
-                    {(!clientFingerprints?.versions || clientFingerprints.versions.length === 0) && (
-                      <div className="text-center py-8 text-text-secondary">No version data available</div>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Weak Algorithms Detection */}
-          <Card>
-            <CardHeader 
-              title="Weak Algorithm Detection" 
-              subtitle="SSH clients using deprecated or weak cryptographic algorithms"
-            />
-            <CardContent>
-              {weakAlgorithmsLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <>
-                  {/* Summary Stats */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                    <div className="bg-bg-secondary rounded-lg p-3 text-center">
-                      <div className="text-2xl font-display font-bold text-neon-green">{weakAlgorithms?.summary?.total_sessions || 0}</div>
-                      <div className="text-xs text-text-secondary">Total Sessions</div>
-                    </div>
-                    <div className="bg-bg-secondary rounded-lg p-3 text-center">
-                      <div className="text-2xl font-display font-bold text-neon-red">{weakAlgorithms?.summary?.sessions_with_weak || 0}</div>
-                      <div className="text-xs text-text-secondary">With Weak Algorithms</div>
-                    </div>
-                    <div className="bg-bg-secondary rounded-lg p-3 text-center">
-                      <div className="text-2xl font-display font-bold text-neon-orange">{weakAlgorithms?.summary?.weak_percentage || 0}%</div>
-                      <div className="text-xs text-text-secondary">Percentage</div>
-                    </div>
-                    <div className="bg-bg-secondary rounded-lg p-3 text-center">
-                      <div className="text-2xl font-display font-bold text-neon-purple">{weakAlgorithms?.summary?.unique_attackers_with_weak || 0}</div>
-                      <div className="text-xs text-text-secondary">Unique Attackers</div>
-                    </div>
-                  </div>
-
-                  {/* Weak Algorithm Lists */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <h4 className="text-sm font-medium text-neon-red mb-3">Weak Ciphers</h4>
-                      <div className="space-y-2">
-                        {weakAlgorithms?.weak_ciphers?.map((item) => (
-                          <div key={item.algorithm} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                            <span className="font-mono text-xs text-text-primary truncate">{item.algorithm}</span>
-                            <span className="font-mono text-neon-red text-sm">{item.count}</span>
-                          </div>
-                        ))}
-                        {(!weakAlgorithms?.weak_ciphers || weakAlgorithms.weak_ciphers.length === 0) && (
-                          <div className="text-center py-4 text-text-secondary text-sm flex items-center justify-center gap-2">
-                            <CheckCircle className="w-4 h-4 text-neon-green" /> None detected
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-neon-orange mb-3">Weak Key Exchange</h4>
-                      <div className="space-y-2">
-                        {weakAlgorithms?.weak_kex?.map((item) => (
-                          <div key={item.algorithm} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                            <span className="font-mono text-xs text-text-primary truncate">{item.algorithm}</span>
-                            <span className="font-mono text-neon-orange text-sm">{item.count}</span>
-                          </div>
-                        ))}
-                        {(!weakAlgorithms?.weak_kex || weakAlgorithms.weak_kex.length === 0) && (
-                          <div className="text-center py-4 text-text-secondary text-sm flex items-center justify-center gap-2">
-                            <CheckCircle className="w-4 h-4 text-neon-green" /> None detected
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-neon-purple mb-3">Weak MAC</h4>
-                      <div className="space-y-2">
-                        {weakAlgorithms?.weak_mac?.map((item) => (
-                          <div key={item.algorithm} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                            <span className="font-mono text-xs text-text-primary truncate">{item.algorithm}</span>
-                            <span className="font-mono text-neon-purple text-sm">{item.count}</span>
-                          </div>
-                        ))}
-                        {(!weakAlgorithms?.weak_mac || weakAlgorithms.weak_mac.length === 0) && (
-                          <div className="text-center py-4 text-text-secondary text-sm flex items-center justify-center gap-2">
-                            <CheckCircle className="w-4 h-4 text-neon-green" /> None detected
-                          </div>
-                        )}
-                      </div>
-                    </div>
                   </div>
                 </>
               )}
@@ -1076,8 +934,9 @@ export default function Cowrie() {
           {/* Command Categorization with MITRE */}
           <Card>
             <CardHeader 
-              title="Command Analysis with MITRE ATT&CK" 
+              title="MITRE ATT&CK Mapping" 
               subtitle="Commands categorized by attack stage and mapped to MITRE techniques"
+              icon={<Shield className="w-5 h-5" />}
             />
             <CardContent>
               {commandCategoriesLoading ? (
@@ -1098,7 +957,7 @@ export default function Cowrie() {
                     {/* MITRE Techniques */}
                     <div>
                       <h4 className="text-sm font-medium text-text-secondary mb-3">Detected MITRE Techniques</h4>
-                      <div className="space-y-2">
+                      <div className="space-y-2 max-h-80 overflow-y-auto">
                         {commandCategories?.techniques?.map((tech) => (
                           <div key={tech.id} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
                             <div>
@@ -1115,10 +974,10 @@ export default function Cowrie() {
                       </div>
                     </div>
 
-                    {/* Top Commands */}
+                    {/* Top Commands with MITRE mapping */}
                     <div>
-                      <h4 className="text-sm font-medium text-text-secondary mb-3">Top Commands Executed</h4>
-                      <div className="space-y-2 max-h-64 overflow-y-auto">
+                      <h4 className="text-sm font-medium text-text-secondary mb-3">Top Commands with MITRE Mapping</h4>
+                      <div className="space-y-2 max-h-80 overflow-y-auto">
                         {commandCategories?.commands?.slice(0, 15).map((cmd, index) => (
                           <div key={index} className="p-2 bg-bg-secondary rounded-lg">
                             <div className="flex items-center justify-between mb-1">

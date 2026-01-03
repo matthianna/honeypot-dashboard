@@ -140,8 +140,16 @@ class AttackMapManager:
 attack_map_manager = AttackMapManager()
 
 
-async def poll_new_events(poll_seconds: int = 10) -> List[dict]:
-    """Poll Elasticsearch for new events from all honeypots."""
+async def poll_all_events(poll_seconds: int, seen_ids: Set[str]) -> List[dict]:
+    """Poll Elasticsearch for new events from all honeypots.
+    
+    Args:
+        poll_seconds: How many seconds back to look for events
+        seen_ids: Set of already-seen event IDs (per-connection tracking)
+    
+    Returns:
+        List of new attack events
+    """
     es = get_es_service()
     if not es:
         return []
@@ -176,9 +184,12 @@ async def poll_new_events(poll_seconds: int = 10) -> List[dict]:
             for hit in result.get("hits", {}).get("hits", []):
                 event_id = hit["_id"]
                 
-                # Skip already seen events
-                if not attack_map_manager.is_new_event(event_id):
+                # Skip already seen events for THIS connection
+                if event_id in seen_ids:
                     continue
+                
+                # Mark as seen
+                seen_ids.add(event_id)
                 
                 source = hit["_source"]
                 data = extract_event_data(source, honeypot)
@@ -209,6 +220,11 @@ async def poll_new_events(poll_seconds: int = 10) -> List[dict]:
     return events
 
 
+async def poll_new_events(poll_seconds: int = 10) -> List[dict]:
+    """Poll Elasticsearch for new events (legacy function for /recent endpoint)."""
+    return await poll_all_events(poll_seconds, attack_map_manager.seen_event_ids)
+
+
 async def get_current_stats() -> dict:
     """Get current attack map statistics."""
     es = get_es_service()
@@ -222,8 +238,8 @@ async def get_current_stats() -> dict:
         try:
             # Determine IP and country fields (use .keyword for text fields)
             if honeypot == "cowrie":
-                ip_field = "cowrie.src_ip"
-                country_field = "cowrie.geo.country_name"
+                ip_field = "json.src_ip"
+                country_field = "source.geo.country_name"
             else:
                 ip_field = "source.ip"
                 country_field = "source.geo.country_name.keyword"
@@ -259,40 +275,51 @@ async def attackmap_websocket(websocket: WebSocket):
     """WebSocket endpoint for real-time attack map updates."""
     await attack_map_manager.connect(websocket)
     
+    # Per-connection tracking of seen event IDs
+    connection_seen_ids: Set[str] = set()
+    
     try:
         # Send initial stats
         stats = await get_current_stats()
         await attack_map_manager.send_stats(websocket, stats)
         
-        # Send recent events immediately
-        recent = await poll_new_events(60)  # Last 60 seconds
-        for event in recent[:20]:  # Limit initial burst
+        # Send recent events immediately (last 30 seconds)
+        initial_events = await poll_all_events(30, connection_seen_ids)
+        for event in initial_events[:20]:  # Limit initial burst
             try:
                 await websocket.send_json({"type": "attack", "event": event})
-                await asyncio.sleep(0.05)  # Small delay for smooth animation
+                await asyncio.sleep(0.01)  # Reduced delay for faster initial load
             except Exception:
                 break
         
-        # Polling loop - poll every 2 seconds
+        # Polling loop - poll every 250ms for true real-time updates
         poll_count = 0
         while True:
             try:
-                # Check for incoming messages with short timeout
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=2.0)
+                # Check for incoming messages with short timeout (250ms)
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=0.25)
                 
                 if data.get("type") == "get_stats":
                     stats = await get_current_stats()
                     await attack_map_manager.send_stats(websocket, stats)
                     
             except asyncio.TimeoutError:
-                # Poll for new events
-                events = await poll_new_events(5)
+                # Poll for new events (last 1 second for faster detection)
+                events = await poll_all_events(1, connection_seen_ids)
                 for event in events:
-                    await attack_map_manager.broadcast_event(event)
+                    try:
+                        await websocket.send_json({"type": "attack", "event": event})
+                    except Exception:
+                        break
                 
-                # Update stats every 5 polls (10 seconds)
+                # Cleanup old seen IDs to prevent memory bloat
+                if len(connection_seen_ids) > 2000:
+                    # Keep only the most recent 1000
+                    connection_seen_ids.clear()
+                
+                # Update stats every 40 polls (10 seconds at 250ms intervals)
                 poll_count += 1
-                if poll_count >= 5:
+                if poll_count >= 40:
                     poll_count = 0
                     stats = await get_current_stats()
                     await attack_map_manager.send_stats(websocket, stats)

@@ -4,6 +4,7 @@ import { scaleLinear } from 'd3-scale';
 import { Globe, TrendingUp, Shield, Server } from 'lucide-react';
 import api from '../services/api';
 import LoadingSpinner from './LoadingSpinner';
+import ExportButton from './ExportButton';
 
 const GEO_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json';
 
@@ -170,7 +171,15 @@ export function GlobalAttackHeatmap() {
           <Globe className="w-5 h-5 text-neon-pink" />
           <h3 className="font-display font-bold text-text-primary">Global Attack Heatmap</h3>
         </div>
-        <span className="text-sm text-text-muted">Last 30 days • {totalAttacks.toLocaleString()} attacks</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-text-muted">Last 30 days • {totalAttacks.toLocaleString()} attacks</span>
+          <ExportButton 
+            data={geoData}
+            filename="global_attacks_by_country"
+            timeRange="30d"
+            disabled={loading || geoData.length === 0}
+          />
+        </div>
       </div>
       
       <div className="relative h-80">
@@ -345,28 +354,36 @@ export function HoneypotAttackMaps() {
         </div>
         
         {/* Honeypot selector */}
-        <div className="flex gap-2 flex-wrap">
-          {honeypotData.map(hp => (
-            <button
-              key={hp.honeypot}
-              onClick={() => setSelectedHoneypot(hp.honeypot)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                selectedHoneypot === hp.honeypot
-                  ? 'ring-2 ring-offset-2 ring-offset-bg-secondary'
-                  : 'opacity-60 hover:opacity-100'
-              }`}
-              style={{
-                backgroundColor: selectedHoneypot === hp.honeypot ? hp.color + '33' : 'transparent',
-                color: hp.color,
-                borderColor: hp.color,
-                border: '1px solid',
-                boxShadow: selectedHoneypot === hp.honeypot ? `0 0 10px ${hp.color}40` : 'none'
-              }}
-            >
-              {hp.honeypot.charAt(0).toUpperCase() + hp.honeypot.slice(1)}
-              <span className="ml-2 opacity-70">({hp.total.toLocaleString()})</span>
-            </button>
-          ))}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex gap-2 flex-wrap">
+            {honeypotData.map(hp => (
+              <button
+                key={hp.honeypot}
+                onClick={() => setSelectedHoneypot(hp.honeypot)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                  selectedHoneypot === hp.honeypot
+                    ? 'ring-2 ring-offset-2 ring-offset-bg-secondary'
+                    : 'opacity-60 hover:opacity-100'
+                }`}
+                style={{
+                  backgroundColor: selectedHoneypot === hp.honeypot ? hp.color + '33' : 'transparent',
+                  color: hp.color,
+                  borderColor: hp.color,
+                  border: '1px solid',
+                  boxShadow: selectedHoneypot === hp.honeypot ? `0 0 10px ${hp.color}40` : 'none'
+                }}
+              >
+                {hp.honeypot.charAt(0).toUpperCase() + hp.honeypot.slice(1)}
+                <span className="ml-2 opacity-70">({hp.total.toLocaleString()})</span>
+              </button>
+            ))}
+          </div>
+          <ExportButton 
+            data={currentData?.countries || []}
+            filename={`${selectedHoneypot}_attacks_by_country`}
+            timeRange="30d"
+            disabled={loading || !currentData || currentData.countries.length === 0}
+          />
         </div>
       </div>
       
@@ -570,7 +587,15 @@ export function CombinedHoneypotMap() {
           <Shield className="w-5 h-5 text-neon-purple" />
           <h3 className="font-display font-bold text-text-primary">Combined Attack Sources</h3>
         </div>
-        <span className="text-sm text-text-muted">Hover to see breakdown by honeypot</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-text-muted">Hover to see breakdown by honeypot</span>
+          <ExportButton 
+            data={Object.entries(totalByCountry).map(([country, count]) => ({ country, count }))}
+            filename="combined_attacks_by_country"
+            timeRange="30d"
+            disabled={loading || Object.keys(totalByCountry).length === 0}
+          />
+        </div>
       </div>
       
       <div className="relative h-80">
@@ -741,7 +766,15 @@ export function AttackTrendMap() {
           <TrendingUp className="w-5 h-5 text-neon-green" />
           <h3 className="font-display font-bold text-text-primary">Weekly Attack Trends</h3>
         </div>
-        <span className="text-sm text-text-muted">Last 7 days • {totalAttacks.toLocaleString()} attacks</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-text-muted">Last 7 days • {totalAttacks.toLocaleString()} attacks</span>
+          <ExportButton 
+            data={geoData}
+            filename="weekly_attack_trends"
+            timeRange="7d"
+            disabled={loading || geoData.length === 0}
+          />
+        </div>
       </div>
       
       <div className="relative h-80">

@@ -15,6 +15,7 @@ import {
   ChevronDown,
   BarChart2,
   Users,
+  FileText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import SessionTimeoutWarning from './SessionTimeoutWarning';
@@ -22,8 +23,9 @@ import SessionTimeoutWarning from './SessionTimeoutWarning';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Attack Map', href: '/attack-map', icon: Map },
-  { name: 'Geo Analytics', href: '/analytics', icon: BarChart2 },
+  { name: 'Analytics', href: '/analytics', icon: BarChart2 },
   { name: 'Attackers', href: '/attackers', icon: Users },
+  { name: 'Thesis Report', href: '/report', icon: FileText },
 ];
 
 const honeypots = [
@@ -41,7 +43,10 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [honeypotsOpen, setHoneypotsOpen] = useState(true);
 
-  const isActive = (path: string) => location.pathname === path;
+  const isActive = (path: string) => {
+    if (path === '/') return location.pathname === '/';
+    return location.pathname.startsWith(path);
+  };
 
   return (
     <div className="min-h-screen bg-bg-primary grid-bg">
@@ -174,13 +179,15 @@ export default function Layout() {
             <h1 className="text-lg font-display font-semibold text-text-primary">
               {location.pathname === '/' && 'Dashboard'}
               {location.pathname === '/attack-map' && 'Attack Map'}
-              {location.pathname === '/analytics' && 'Geographic Analytics'}
+              {location.pathname.startsWith('/analytics') && 'Analytics Dashboard'}
               {location.pathname === '/cowrie' && 'Cowrie SSH Honeypot'}
               {location.pathname === '/dionaea' && 'Dionaea Honeypot'}
               {location.pathname === '/galah' && 'Galah Web Honeypot'}
               {location.pathname === '/rdpy' && 'RDPY RDP Honeypot'}
               {location.pathname === '/heralding' && 'Heralding Honeypot'}
               {location.pathname === '/firewall' && 'Firewall (OPNsense)'}
+              {location.pathname === '/report' && 'Thesis Report'}
+              {location.pathname === '/attackers' && 'Attackers'}
             </h1>
           </div>
 

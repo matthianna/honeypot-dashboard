@@ -30,6 +30,11 @@ export interface TopAttacker {
   count: number;
   country?: string;
   city?: string;
+  // Duration metrics for human vs script detection
+  total_duration_seconds?: number;
+  avg_session_duration?: number;
+  session_count?: number;
+  behavior_classification?: 'Script' | 'Human' | 'Bot';
 }
 
 // Dashboard types
@@ -205,6 +210,8 @@ export interface HoneypotActivity {
   event_count: number;
   first_seen: string;
   last_seen: string;
+  duration_seconds?: number;
+  session_count?: number;
 }
 
 export interface AttackerProfile {
@@ -216,6 +223,11 @@ export interface AttackerProfile {
   honeypot_activity: HoneypotActivity[];
   credentials_tried?: CowrieCredential[];
   commands_executed?: string[];
+  // Duration metrics for human vs script detection
+  total_duration_seconds?: number;
+  avg_session_duration?: number;
+  session_count?: number;
+  behavior_classification?: 'Script' | 'Human' | 'Bot';
 }
 
 // Heatmap types

@@ -507,3 +507,173 @@ async def get_dionaea_hourly_breakdown(
         hourly_data.append(hour_data)
     
     return {"time_range": time_range, "hourly_data": hourly_data}
+
+
+@router.get("/malware-analysis")
+async def get_dionaea_malware_analysis(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get enhanced malware analysis - looking for download attempts, 
+    HTTP paths, and potential payload indicators.
+    """
+    es = get_es_service()
+    
+    # Search for HTTP requests that look like malware downloads
+    result = await es.search(
+        index=INDEX,
+        query={"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"term": {"dionaea.component.keyword": "http"}}
+        ]}},
+        size=500,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    # Extract paths and URLs
+    paths = {}
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        msg = source.get("dionaea", {}).get("msg", "")
+        
+        # Look for extracted paths
+        if "Extracted path" in msg:
+            path = msg.replace("Extracted path ", "").strip()
+            if path not in paths:
+                paths[path] = {"count": 0, "first_seen": source.get("@timestamp")}
+            paths[path]["count"] += 1
+    
+    # Categorize paths
+    categories = {
+        "credential_files": [],
+        "config_files": [],
+        "shell_scripts": [],
+        "executables": [],
+        "web_exploits": [],
+        "other": []
+    }
+    
+    for path, data in sorted(paths.items(), key=lambda x: -x[1]["count"])[:100]:
+        path_lower = path.lower()
+        entry = {"path": path, "count": data["count"], "first_seen": data["first_seen"]}
+        
+        # Generate VirusTotal search link for suspicious paths
+        if any(ext in path_lower for ext in [".exe", ".dll", ".bin", ".sh", ".pl", ".py"]):
+            entry["suspicious"] = True
+        
+        if any(x in path_lower for x in [".env", "passwd", "credential", "password", "config", "wp-config"]):
+            categories["credential_files"].append(entry)
+        elif any(x in path_lower for x in [".conf", ".cfg", ".ini", ".xml", ".json"]):
+            categories["config_files"].append(entry)
+        elif any(x in path_lower for x in [".sh", ".bash", ".pl", ".py"]):
+            categories["shell_scripts"].append(entry)
+        elif any(x in path_lower for x in [".exe", ".dll", ".bin", ".elf"]):
+            categories["executables"].append(entry)
+        elif any(x in path_lower for x in ["phpunit", "cgi-bin", "eval", "admin", "wp-", "xmlrpc"]):
+            categories["web_exploits"].append(entry)
+        else:
+            categories["other"].append(entry)
+    
+    # Get component breakdown
+    component_result = await es.search(
+        index=INDEX,
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            "by_component": {
+                "terms": {"field": "dionaea.component.keyword", "size": 20}
+            }
+        }
+    )
+    
+    components = [
+        {"component": b["key"], "count": b["doc_count"]}
+        for b in component_result.get("aggregations", {}).get("by_component", {}).get("buckets", [])
+    ]
+    
+    return {
+        "time_range": time_range,
+        "total_http_events": result.get("hits", {}).get("total", {}).get("value", 0),
+        "unique_paths": len(paths),
+        "categories": categories,
+        "components": components,
+        "summary": {
+            "credential_attempts": len(categories["credential_files"]),
+            "config_probes": len(categories["config_files"]),
+            "shell_downloads": len(categories["shell_scripts"]),
+            "executable_downloads": len(categories["executables"]),
+            "web_exploits": len(categories["web_exploits"])
+        }
+    }
+
+
+@router.get("/all-connections")
+async def get_dionaea_all_connections(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    port: Optional[int] = Query(default=None),
+    src_ip: Optional[str] = Query(default=None),
+    _: str = Depends(get_current_user)
+):
+    """Get all Dionaea connections with pagination and filtering."""
+    es = get_es_service()
+    
+    port_services = {
+        21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+        80: "HTTP", 110: "POP3", 135: "MSRPC", 139: "NetBIOS", 143: "IMAP",
+        443: "HTTPS", 445: "SMB", 1433: "MSSQL", 1723: "PPTP", 1900: "UPnP",
+        3306: "MySQL", 3389: "RDP", 5060: "SIP", 5432: "PostgreSQL",
+        5900: "VNC", 6379: "Redis", 8080: "HTTP-ALT", 27017: "MongoDB"
+    }
+    
+    must_clauses = [
+        es._get_time_range_query(time_range),
+        {"exists": {"field": "source.ip"}}
+    ]
+    
+    if port:
+        must_clauses.append({"term": {"destination.port": port}})
+    if src_ip:
+        must_clauses.append({"term": {"source.ip": src_ip}})
+    
+    query = {"bool": {"must": must_clauses}}
+    
+    result = await es.search(
+        index=INDEX,
+        query=query,
+        size=limit,
+        from_=offset,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    total = result.get("hits", {}).get("total", {}).get("value", 0)
+    
+    connections = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        dionaea = source.get("dionaea", {})
+        dest_port = source.get("destination", {}).get("port")
+        
+        connections.append({
+            "id": hit["_id"],
+            "timestamp": source.get("@timestamp"),
+            "src_ip": source.get("source", {}).get("ip"),
+            "src_port": source.get("source", {}).get("port"),
+            "dst_ip": source.get("destination", {}).get("ip"),
+            "dst_port": dest_port,
+            "service": port_services.get(dest_port, f"Port {dest_port}") if dest_port else "Unknown",
+            "transport": source.get("network", {}).get("transport"),
+            "component": dionaea.get("component"),
+            "message": dionaea.get("msg", "")[:200],
+            "country": source.get("source", {}).get("geo", {}).get("country_name"),
+            "city": source.get("source", {}).get("geo", {}).get("city_name"),
+        })
+    
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "connections": connections
+    }

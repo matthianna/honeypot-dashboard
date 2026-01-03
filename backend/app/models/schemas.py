@@ -50,6 +50,11 @@ class TopAttacker(BaseModel):
     count: int
     country: Optional[str] = None
     city: Optional[str] = None
+    # Duration metrics for human vs script detection
+    total_duration_seconds: Optional[float] = None
+    avg_session_duration: Optional[float] = None
+    session_count: Optional[int] = None
+    behavior_classification: Optional[str] = None  # "Script", "Human", "Bot"
 
 
 class TopAttackersResponse(BaseModel):
@@ -269,6 +274,8 @@ class HoneypotActivity(BaseModel):
     event_count: int
     first_seen: str
     last_seen: str
+    duration_seconds: Optional[float] = None
+    session_count: Optional[int] = None
 
 
 class AttackerProfile(BaseModel):
@@ -281,4 +288,9 @@ class AttackerProfile(BaseModel):
     honeypot_activity: List[HoneypotActivity]
     credentials_tried: Optional[List[CowrieCredential]] = None
     commands_executed: Optional[List[str]] = None
+    # Duration metrics for human vs script detection
+    total_duration_seconds: Optional[float] = None
+    avg_session_duration: Optional[float] = None
+    session_count: Optional[int] = None
+    behavior_classification: Optional[str] = None  # "Script", "Human", "Bot"
 

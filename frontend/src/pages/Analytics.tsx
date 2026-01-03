@@ -1,14 +1,54 @@
-import { Map, BarChart2, Globe, TrendingUp } from 'lucide-react';
+import { Map, BarChart2, Globe, TrendingUp, Activity, MapPin } from 'lucide-react';
 import { 
   GlobalAttackHeatmap, 
   HoneypotAttackMaps, 
   CombinedHoneypotMap,
   AttackTrendMap 
 } from '../components/CountryAttackMaps';
+import AttackTimeline from '../components/AttackTimeline';
+import LeafletGeoMap from '../components/LeafletGeoMap';
 import Tabs from '../components/Tabs';
 
 export default function Analytics() {
   const tabs = [
+    {
+      id: 'timeline',
+      label: 'Attack Timeline',
+      icon: <Activity className="w-4 h-4" />,
+      content: (
+        <div className="space-y-6">
+          <AttackTimeline />
+          <div className="bg-bg-secondary rounded-xl border border-bg-hover p-4">
+            <h4 className="font-display font-bold text-text-primary mb-3">Understanding the Timeline</h4>
+            <p className="text-text-secondary text-sm">
+              This interactive timeline shows attack activity across all your honeypots over time. 
+              Click on the honeypot cards above the chart to toggle their visibility. 
+              The stacked area chart helps you understand attack patterns and which services are being targeted most frequently.
+              Use the time range selector to zoom in on specific periods.
+            </p>
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: 'interactive',
+      label: 'Interactive Map',
+      icon: <MapPin className="w-4 h-4" />,
+      content: (
+        <div className="space-y-6">
+          <LeafletGeoMap />
+          <div className="bg-bg-secondary rounded-xl border border-bg-hover p-4">
+            <h4 className="font-display font-bold text-text-primary mb-3">Interactive Attack Map</h4>
+            <p className="text-text-secondary text-sm">
+              This zoomable map shows attack origins with circle markers. The circle size represents the attack count from each country.
+              Use the layer switcher (top right) to change between Dark, Street, Satellite, and Terrain views.
+              Filter by honeypot type to see which services are being targeted from each region.
+              Hover over any circle to see detailed attack breakdown.
+            </p>
+          </div>
+        </div>
+      ),
+    },
     {
       id: 'global',
       label: 'Global Heatmap',

@@ -584,3 +584,340 @@ async def get_heralding_credential_velocity(
         "velocity": velocity_data,
         "total_attempts": total_attempts
     }
+
+
+# Common passwords from RockYou and other wordlists
+COMMON_PASSWORDS = {
+    "123456", "password", "12345678", "qwerty", "123456789", "12345", "1234",
+    "111111", "1234567", "dragon", "123123", "baseball", "iloveyou", "trustno1",
+    "sunshine", "princess", "welcome", "shadow", "superman", "michael", "ninja",
+    "mustang", "password1", "123qwe", "admin", "root", "letmein", "master",
+    "hello", "monkey", "abc123", "football", "654321", "passw0rd", "test",
+    "123321", "666666", "1qaz2wsx", "qwerty123", "password123", "qwertyuiop",
+    "1234567890", "121212", "000000", "zaq12wsx", "pass", "1q2w3e4r", "P@ssw0rd",
+    "admin123", "root123", "toor", "changeme", "guest", "default", "raspberry"
+}
+
+
+def calculate_password_strength(password: str) -> dict:
+    """Calculate password strength score and category."""
+    if not password:
+        return {"score": 0, "category": "empty", "length": 0}
+    
+    length = len(password)
+    score = 0
+    
+    # Length scoring
+    if length >= 8:
+        score += 1
+    if length >= 12:
+        score += 1
+    if length >= 16:
+        score += 1
+    
+    # Character diversity
+    has_lower = any(c.islower() for c in password)
+    has_upper = any(c.isupper() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_special = any(not c.isalnum() for c in password)
+    
+    score += sum([has_lower, has_upper, has_digit, has_special])
+    
+    # Penalty for common passwords
+    is_common = password.lower() in COMMON_PASSWORDS
+    if is_common:
+        score = max(0, score - 3)
+    
+    # Category assignment
+    if score <= 1:
+        category = "very_weak"
+    elif score <= 3:
+        category = "weak"
+    elif score <= 5:
+        category = "moderate"
+    elif score <= 6:
+        category = "strong"
+    else:
+        category = "very_strong"
+    
+    return {
+        "score": score,
+        "category": category,
+        "length": length,
+        "has_lower": has_lower,
+        "has_upper": has_upper,
+        "has_digit": has_digit,
+        "has_special": has_special,
+        "is_common": is_common
+    }
+
+
+@router.get("/password-analysis")
+async def get_heralding_password_analysis(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Analyze passwords with strength scoring and common password detection."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"range": {"num_auth_attempts": {"gt": 0}}}
+        ]}},
+        size=1000,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    # Collect all passwords
+    password_data = {}
+    total_attempts = 0
+    
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        auth_attempts = source.get("auth_attempts", [])
+        
+        for attempt in auth_attempts:
+            password = attempt.get("password", "")
+            if password:
+                total_attempts += 1
+                if password not in password_data:
+                    password_data[password] = {
+                        "password": password,
+                        "count": 0,
+                        "strength": calculate_password_strength(password)
+                    }
+                password_data[password]["count"] += 1
+    
+    # Sort by count
+    sorted_passwords = sorted(password_data.values(), key=lambda x: -x["count"])
+    
+    # Calculate statistics
+    strength_distribution = {"very_weak": 0, "weak": 0, "moderate": 0, "strong": 0, "very_strong": 0}
+    common_count = 0
+    length_sum = 0
+    
+    for pwd_info in password_data.values():
+        strength_distribution[pwd_info["strength"]["category"]] += pwd_info["count"]
+        if pwd_info["strength"]["is_common"]:
+            common_count += pwd_info["count"]
+        length_sum += pwd_info["strength"]["length"] * pwd_info["count"]
+    
+    avg_length = round(length_sum / total_attempts, 1) if total_attempts > 0 else 0
+    common_percentage = round((common_count / total_attempts) * 100, 1) if total_attempts > 0 else 0
+    
+    # Top common passwords found
+    top_common = [
+        p for p in sorted_passwords 
+        if p["strength"]["is_common"]
+    ][:20]
+    
+    return {
+        "time_range": time_range,
+        "total_unique_passwords": len(password_data),
+        "total_attempts": total_attempts,
+        "avg_password_length": avg_length,
+        "common_password_percentage": common_percentage,
+        "strength_distribution": strength_distribution,
+        "top_passwords": sorted_passwords[:50],
+        "top_common_passwords": top_common,
+        "passwords_by_strength": {
+            "very_weak": [p for p in sorted_passwords if p["strength"]["category"] == "very_weak"][:10],
+            "weak": [p for p in sorted_passwords if p["strength"]["category"] == "weak"][:10],
+            "moderate": [p for p in sorted_passwords if p["strength"]["category"] == "moderate"][:10],
+            "strong": [p for p in sorted_passwords if p["strength"]["category"] == "strong"][:10],
+        }
+    }
+
+
+@router.get("/brute-force-detection")
+async def get_heralding_brute_force_detection(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    min_attempts: int = Query(default=10, ge=5),
+    _: str = Depends(get_current_user)
+):
+    """Detect brute-force attacks - rapid credential attempts from same IP."""
+    es = get_es_service()
+    
+    # Get IPs with high auth attempt counts
+    result = await es.search(
+        index=INDEX,
+        query={"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"range": {"num_auth_attempts": {"gt": 0}}}
+        ]}},
+        size=0,
+        aggs={
+            "by_ip": {
+                "terms": {"field": "source.ip", "size": 100},
+                "aggs": {
+                    "total_attempts": {"sum": {"field": "num_auth_attempts"}},
+                    "session_count": {"cardinality": {"field": "session_id"}},
+                    "first_seen": {"min": {"field": "@timestamp"}},
+                    "last_seen": {"max": {"field": "@timestamp"}},
+                    "protocols": {"terms": {"field": "network.protocol", "size": 10}},
+                    "geo": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["source.geo.country_name", "source.geo.city_name"]
+                        }
+                    }
+                }
+            }
+        }
+    )
+    
+    brute_forcers = []
+    for bucket in result.get("aggregations", {}).get("by_ip", {}).get("buckets", []):
+        total_attempts = int(bucket.get("total_attempts", {}).get("value", 0) or 0)
+        
+        if total_attempts >= min_attempts:
+            first_seen = bucket.get("first_seen", {}).get("value_as_string")
+            last_seen = bucket.get("last_seen", {}).get("value_as_string")
+            
+            # Calculate attack duration and rate
+            if first_seen and last_seen:
+                from datetime import datetime
+                try:
+                    first = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                    last = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                    duration_seconds = max(1, (last - first).total_seconds())
+                    attempts_per_minute = round((total_attempts / duration_seconds) * 60, 1)
+                except:
+                    duration_seconds = 0
+                    attempts_per_minute = 0
+            else:
+                duration_seconds = 0
+                attempts_per_minute = 0
+            
+            # Get geo from top_hits
+            geo_hits = bucket.get("geo", {}).get("hits", {}).get("hits", [])
+            geo = {}
+            if geo_hits:
+                geo_source = geo_hits[0].get("_source", {}).get("source", {}).get("geo", {})
+                geo = {
+                    "country": geo_source.get("country_name"),
+                    "city": geo_source.get("city_name")
+                }
+            
+            protocols = [p["key"] for p in bucket.get("protocols", {}).get("buckets", [])]
+            
+            # Classify attack intensity
+            if attempts_per_minute > 50:
+                intensity = "aggressive"
+            elif attempts_per_minute > 10:
+                intensity = "moderate"
+            else:
+                intensity = "slow"
+            
+            brute_forcers.append({
+                "ip": bucket["key"],
+                "total_attempts": total_attempts,
+                "session_count": bucket.get("session_count", {}).get("value", 0),
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "duration_seconds": int(duration_seconds),
+                "attempts_per_minute": attempts_per_minute,
+                "intensity": intensity,
+                "protocols": protocols,
+                "geo": geo
+            })
+    
+    # Sort by total attempts
+    brute_forcers.sort(key=lambda x: -x["total_attempts"])
+    
+    # Summary stats
+    total_brute_forcers = len(brute_forcers)
+    aggressive_count = sum(1 for bf in brute_forcers if bf["intensity"] == "aggressive")
+    moderate_count = sum(1 for bf in brute_forcers if bf["intensity"] == "moderate")
+    
+    return {
+        "time_range": time_range,
+        "min_attempts_threshold": min_attempts,
+        "total_brute_force_ips": total_brute_forcers,
+        "aggressive_attackers": aggressive_count,
+        "moderate_attackers": moderate_count,
+        "slow_attackers": total_brute_forcers - aggressive_count - moderate_count,
+        "brute_forcers": brute_forcers[:50]
+    }
+
+
+@router.get("/credential-reuse")
+async def get_heralding_credential_reuse(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Detect credential reuse across different IPs."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"range": {"num_auth_attempts": {"gt": 0}}}
+        ]}},
+        size=1000,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    # Map password -> set of IPs
+    password_to_ips = {}
+    username_to_ips = {}
+    combo_to_ips = {}
+    
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        src_ip = source.get("source", {}).get("ip", "unknown")
+        auth_attempts = source.get("auth_attempts", [])
+        
+        for attempt in auth_attempts:
+            username = attempt.get("username", "")
+            password = attempt.get("password", "")
+            
+            if password:
+                if password not in password_to_ips:
+                    password_to_ips[password] = set()
+                password_to_ips[password].add(src_ip)
+            
+            if username:
+                if username not in username_to_ips:
+                    username_to_ips[username] = set()
+                username_to_ips[username].add(src_ip)
+            
+            if username and password:
+                combo = f"{username}:{password}"
+                if combo not in combo_to_ips:
+                    combo_to_ips[combo] = set()
+                combo_to_ips[combo].add(src_ip)
+    
+    # Find reused credentials (used by 2+ IPs)
+    reused_passwords = [
+        {"password": pwd, "ip_count": len(ips), "ips": list(ips)[:5]}
+        for pwd, ips in sorted(password_to_ips.items(), key=lambda x: -len(x[1]))
+        if len(ips) >= 2
+    ][:20]
+    
+    reused_usernames = [
+        {"username": usr, "ip_count": len(ips)}
+        for usr, ips in sorted(username_to_ips.items(), key=lambda x: -len(x[1]))
+        if len(ips) >= 2
+    ][:20]
+    
+    reused_combos = [
+        {"combo": combo, "ip_count": len(ips)}
+        for combo, ips in sorted(combo_to_ips.items(), key=lambda x: -len(x[1]))
+        if len(ips) >= 2
+    ][:20]
+    
+    return {
+        "time_range": time_range,
+        "reused_passwords": reused_passwords,
+        "reused_usernames": reused_usernames,
+        "reused_credential_combos": reused_combos,
+        "summary": {
+            "passwords_used_by_multiple_ips": len([p for p, ips in password_to_ips.items() if len(ips) >= 2]),
+            "usernames_used_by_multiple_ips": len([u for u, ips in username_to_ips.items() if len(ips) >= 2]),
+            "combos_used_by_multiple_ips": len([c for c, ips in combo_to_ips.items() if len(ips) >= 2])
+        }
+    }

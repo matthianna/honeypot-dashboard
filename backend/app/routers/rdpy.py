@@ -264,7 +264,7 @@ async def get_rdpy_connection_patterns(
                 }
             },
             "by_country": {
-                "terms": {"field": "source.geo.country_name.keyword", "size": 20}
+                "terms": {"field": "source.geo.country_name", "size": 20}
             },
             "total_connections": {"value_count": {"field": "@timestamp"}},
             "unique_sources": {"cardinality": {"field": "source.ip"}}
@@ -364,4 +364,230 @@ async def get_rdpy_attack_velocity(
         "velocity": velocity[-48:] if len(velocity) > 48 else velocity,
         "peak_hour": peak_hour,
         "peak_connections": peak_count
+    }
+
+
+@router.get("/username-analysis")
+async def get_rdpy_username_analysis(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Analyze RDP usernames by category (admin, root, user, service accounts, etc)."""
+    import re
+    es = get_es_service()
+    
+    # Get credential messages
+    result = await es.search(
+        index=INDEX,
+        query={
+            "bool": {
+                "must": [
+                    es._get_time_range_query(time_range),
+                    {"wildcard": {"message": "*username:*"}}
+                ]
+            }
+        },
+        size=1000,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    # Parse usernames
+    username_counts = {}
+    for hit in result.get("hits", {}).get("hits", []):
+        message = hit["_source"].get("message", "")
+        username_match = re.search(r'username:([^,]*)', message)
+        if username_match:
+            username = username_match.group(1).strip().lower()
+            if username:
+                username_counts[username] = username_counts.get(username, 0) + 1
+    
+    # Categorize usernames
+    categories = {
+        "admin": {"keywords": ["admin", "administrator", "root", "sudo", "superuser"], "usernames": [], "count": 0},
+        "default": {"keywords": ["user", "guest", "test", "demo", "default", "temp"], "usernames": [], "count": 0},
+        "service": {"keywords": ["service", "svc", "system", "backup", "daemon", "ftp", "www", "http", "mysql", "postgres", "oracle", "sql"], "usernames": [], "count": 0},
+        "domain": {"keywords": ["domain", "corp", "company", "enterprise", "office"], "usernames": [], "count": 0},
+        "personal": {"keywords": [], "usernames": [], "count": 0},  # fallback category
+    }
+    
+    for username, count in username_counts.items():
+        categorized = False
+        for cat_name, cat_data in categories.items():
+            if cat_name == "personal":
+                continue
+            for keyword in cat_data["keywords"]:
+                if keyword in username:
+                    cat_data["usernames"].append({"username": username, "count": count})
+                    cat_data["count"] += count
+                    categorized = True
+                    break
+            if categorized:
+                break
+        
+        if not categorized:
+            categories["personal"]["usernames"].append({"username": username, "count": count})
+            categories["personal"]["count"] += count
+    
+    # Sort usernames within each category
+    for cat_data in categories.values():
+        cat_data["usernames"] = sorted(cat_data["usernames"], key=lambda x: -x["count"])[:15]
+    
+    # Top usernames overall
+    top_usernames = sorted(
+        [{"username": u, "count": c} for u, c in username_counts.items()],
+        key=lambda x: -x["count"]
+    )[:30]
+    
+    total_attempts = sum(username_counts.values())
+    
+    return {
+        "time_range": time_range,
+        "total_attempts": total_attempts,
+        "unique_usernames": len(username_counts),
+        "categories": {
+            name: {
+                "count": data["count"],
+                "percentage": round((data["count"] / total_attempts) * 100, 1) if total_attempts > 0 else 0,
+                "top_usernames": data["usernames"][:10]
+            }
+            for name, data in categories.items()
+        },
+        "top_usernames": top_usernames
+    }
+
+
+@router.get("/domain-analysis")
+async def get_rdpy_domain_analysis(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Analyze Windows domains attempted in RDP attacks."""
+    import re
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={
+            "bool": {
+                "must": [
+                    es._get_time_range_query(time_range),
+                    {"wildcard": {"message": "*domain:*"}}
+                ]
+            }
+        },
+        size=1000,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    domain_counts = {}
+    domain_usernames = {}  # domain -> set of usernames
+    
+    for hit in result.get("hits", {}).get("hits", []):
+        message = hit["_source"].get("message", "")
+        domain_match = re.search(r'domain:([^,]*)', message)
+        username_match = re.search(r'username:([^,]*)', message)
+        
+        if domain_match:
+            domain = domain_match.group(1).strip()
+            if domain:  # Non-empty domain
+                domain_counts[domain] = domain_counts.get(domain, 0) + 1
+                
+                if domain not in domain_usernames:
+                    domain_usernames[domain] = set()
+                
+                if username_match:
+                    username = username_match.group(1).strip()
+                    if username:
+                        domain_usernames[domain].add(username)
+    
+    # Sort domains by count
+    domains = []
+    for domain, count in sorted(domain_counts.items(), key=lambda x: -x[1]):
+        domains.append({
+            "domain": domain,
+            "attempt_count": count,
+            "unique_usernames": len(domain_usernames.get(domain, set())),
+            "sample_usernames": list(domain_usernames.get(domain, set()))[:5]
+        })
+    
+    # Identify domain patterns
+    common_domains = ["workgroup", "localhost", ".", "-", "local"]
+    enterprise_domains = [d for d in domains if d["domain"].lower() not in common_domains and len(d["domain"]) > 3]
+    
+    total_with_domain = sum(domain_counts.values())
+    
+    return {
+        "time_range": time_range,
+        "total_with_domain": total_with_domain,
+        "unique_domains": len(domain_counts),
+        "domains": domains[:30],
+        "enterprise_domains": enterprise_domains[:15],
+        "summary": {
+            "most_targeted_domain": domains[0]["domain"] if domains else None,
+            "most_targeted_count": domains[0]["attempt_count"] if domains else 0,
+        }
+    }
+
+
+@router.get("/hourly-heatmap")
+async def get_rdpy_hourly_heatmap(
+    time_range: str = Query(default="7d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get hour-of-day and day-of-week attack pattern heatmap."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            "by_hour": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "calendar_interval": "hour"
+                }
+            }
+        }
+    )
+    
+    # Process into day/hour grid
+    heatmap = {}  # {day_of_week: {hour: count}}
+    for i in range(7):
+        heatmap[i] = {h: 0 for h in range(24)}
+    
+    for bucket in result.get("aggregations", {}).get("by_hour", {}).get("buckets", []):
+        timestamp = bucket.get("key_as_string", "")
+        count = bucket.get("doc_count", 0)
+        
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            day = dt.weekday()  # 0=Monday
+            hour = dt.hour
+            heatmap[day][hour] += count
+        except:
+            pass
+    
+    # Convert to list format for frontend
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    heatmap_data = []
+    for day_idx, day_name in enumerate(days):
+        for hour in range(24):
+            heatmap_data.append({
+                "day": day_name,
+                "day_index": day_idx,
+                "hour": hour,
+                "count": heatmap[day_idx][hour]
+            })
+    
+    # Find peak times
+    peak = max(heatmap_data, key=lambda x: x["count"])
+    
+    return {
+        "time_range": time_range,
+        "heatmap": heatmap_data,
+        "peak_day": peak["day"],
+        "peak_hour": peak["hour"],
+        "peak_count": peak["count"]
     }

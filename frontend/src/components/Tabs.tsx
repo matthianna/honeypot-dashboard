@@ -5,6 +5,7 @@ interface Tab {
   label: string;
   icon?: ReactNode;
   content: ReactNode;
+  onSelect?: () => void;
 }
 
 interface TabsProps {
@@ -18,6 +19,13 @@ export default function Tabs({ tabs, defaultTab, className = '' }: TabsProps) {
 
   const currentTab = tabs.find((tab) => tab.id === activeTab);
 
+  const handleTabClick = (tab: Tab) => {
+    setActiveTab(tab.id);
+    if (tab.onSelect) {
+      tab.onSelect();
+    }
+  };
+
   return (
     <div className={className}>
       {/* Tab Headers */}
@@ -25,7 +33,7 @@ export default function Tabs({ tabs, defaultTab, className = '' }: TabsProps) {
         {tabs.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => handleTabClick(tab)}
             className={`
               flex items-center px-4 py-3 text-sm font-medium whitespace-nowrap
               border-b-2 transition-all duration-200

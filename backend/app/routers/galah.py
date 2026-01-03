@@ -222,6 +222,97 @@ async def get_galah_paths(
     return paths
 
 
+@router.get("/all-interactions")
+async def get_galah_all_interactions(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    method: Optional[str] = Query(default=None),
+    path_filter: Optional[str] = Query(default=None),
+    source_ip: Optional[str] = Query(default=None),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get ALL Galah HTTP interactions with pagination and filtering.
+    This is the comprehensive view of all HTTP requests.
+    """
+    es = get_es_service()
+    
+    # Build query with filters
+    must_clauses = [es._get_time_range_query(time_range)]
+    
+    if method:
+        must_clauses.append({"term": {"http.request.method": method}})
+    if path_filter:
+        must_clauses.append({"wildcard": {"url.path": f"*{path_filter}*"}})
+    if source_ip:
+        must_clauses.append({"term": {"source.ip": source_ip}})
+    
+    query = {"bool": {"must": must_clauses}}
+    
+    # Get paginated results - ES returns total count automatically
+    result = await es.search(
+        index=INDEX,
+        query=query,
+        size=limit,
+        from_=offset,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    total = result.get("hits", {}).get("total", {}).get("value", 0)
+    
+    interactions = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        
+        # Get response content and metadata
+        http_response_new = source.get("http", {}).get("response", {})
+        http_response_legacy = source.get("httpResponse", {})
+        http_request = source.get("httpRequest", {})
+        
+        response_body = http_response_new.get("body", {}).get("content", "") or http_response_legacy.get("body", "")
+        has_response_content = bool(response_body)
+        
+        # User agent info
+        ua_info = source.get("user_agent", {})
+        
+        interaction = {
+            "id": hit["_id"],
+            "timestamp": source.get("@timestamp"),
+            "source_ip": source.get("source", {}).get("ip"),
+            "source_port": source.get("source", {}).get("port") or source.get("srcPort"),
+            "destination_port": source.get("destination", {}).get("port") or source.get("port"),
+            "method": source.get("http", {}).get("request", {}).get("method"),
+            "path": source.get("url", {}).get("path"),
+            "message": source.get("msg"),
+            "session_id": source.get("session", {}).get("id"),
+            "has_response_content": has_response_content,
+            "content_type": http_response_new.get("mime_type", http_response_legacy.get("headers", {}).get("Content-Type", "")),
+            "user_agent": ua_info.get("original", http_request.get("headers", {}).get("User-Agent", "")),
+            "browser": ua_info.get("name"),
+            "os": ua_info.get("os", {}).get("name"),
+            "geo": {
+                "country": source.get("source", {}).get("geo", {}).get("country_name"),
+                "country_code": source.get("source", {}).get("geo", {}).get("country_iso_code"),
+                "city": source.get("source", {}).get("geo", {}).get("city_name"),
+                "location": source.get("source", {}).get("geo", {}).get("location"),
+            },
+            "request_headers": http_request.get("headers", {}),
+            "request_body": http_request.get("body", ""),
+            "response_status": http_response_legacy.get("statusCode", 200),
+            "generation_source": source.get("responseMetadata", {}).get("generationSource"),
+        }
+        
+        interactions.append(interaction)
+    
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "interactions": interactions
+    }
+
+
 @router.get("/interactions")
 async def get_galah_interactions(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
@@ -827,10 +918,10 @@ async def get_galah_success_rate_trend(
                 },
                 "aggs": {
                     "success": {
-                        "filter": {"term": {"msg.keyword": "success"}}
+                        "filter": {"term": {"msg": "successfulResponse"}}
                     },
                     "failed": {
-                        "filter": {"term": {"msg.keyword": "failed"}}
+                        "filter": {"prefix": {"msg": "failedResponse"}}
                     }
                 }
             }
@@ -867,7 +958,7 @@ async def get_galah_path_categories(
         size=0,
         aggs={
             "paths": {
-                "terms": {"field": "url.path.keyword", "size": 200}
+                "terms": {"field": "url.path", "size": 200}
             }
         }
     )
@@ -929,10 +1020,10 @@ async def get_galah_request_methods(
         size=0,
         aggs={
             "by_method": {
-                "terms": {"field": "http.request.method.keyword", "size": 10},
+                "terms": {"field": "http.request.method", "size": 10},
                 "aggs": {
-                    "success": {"filter": {"term": {"msg.keyword": "success"}}},
-                    "failed": {"filter": {"term": {"msg.keyword": "failed"}}}
+                    "success": {"filter": {"term": {"msg": "successfulResponse"}}},
+                    "failed": {"filter": {"prefix": {"msg": "failedResponse"}}}
                 }
             }
         }
@@ -968,12 +1059,12 @@ async def get_galah_session_depth(
         size=0,
         aggs={
             "sessions": {
-                "terms": {"field": "session.id.keyword", "size": 1000},
+                "terms": {"field": "session.id", "size": 1000},
                 "aggs": {
                     "request_count": {"value_count": {"field": "@timestamp"}}
                 }
             },
-            "total_sessions": {"cardinality": {"field": "session.id.keyword"}}
+            "total_sessions": {"cardinality": {"field": "session.id"}}
         }
     )
     

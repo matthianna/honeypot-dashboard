@@ -17,16 +17,15 @@ router = APIRouter()
 
 def extract_geo_from_event(event: dict, honeypot: str) -> Optional[str]:
     """Extract country from event based on honeypot type."""
-    if honeypot == "cowrie":
-        return event.get("cowrie", {}).get("geo", {}).get("country_name")
-    else:
-        return event.get("source", {}).get("geo", {}).get("country_name")
+    # All honeypots now use source.geo for GeoIP (if enriched)
+    return event.get("source", {}).get("geo", {}).get("country_name")
 
 
 def extract_src_ip_from_event(event: dict, honeypot: str) -> Optional[str]:
     """Extract source IP from event based on honeypot type."""
     if honeypot == "cowrie":
-        return event.get("cowrie", {}).get("src_ip")
+        # New Cowrie structure uses json.src_ip
+        return event.get("json", {}).get("src_ip")
     else:
         return event.get("source", {}).get("ip")
 
@@ -63,9 +62,13 @@ async def get_attacker_profile(
     honeypot_activity = []
     credentials_tried = []
     commands_executed = []
+    all_session_durations = []
     
     for honeypot, events in events_by_honeypot.items():
         total_events += len(events)
+        
+        # Track sessions for this honeypot
+        sessions = {}
         
         # Extract timestamps
         timestamps = []
@@ -79,6 +82,24 @@ async def get_attacker_profile(
             country = extract_geo_from_event(event, honeypot)
             if country:
                 countries.add(country)
+            
+            # Track session for duration calculation
+            session_id = None
+            if honeypot == "cowrie":
+                session_id = event.get("cowrie", {}).get("session")
+            elif honeypot == "galah":
+                session_id = event.get("session", {}).get("id")
+            elif honeypot == "heralding":
+                session_id = event.get("session_id")
+            
+            if session_id and ts:
+                if session_id not in sessions:
+                    sessions[session_id] = {"first": ts, "last": ts}
+                else:
+                    if ts < sessions[session_id]["first"]:
+                        sessions[session_id]["first"] = ts
+                    if ts > sessions[session_id]["last"]:
+                        sessions[session_id]["last"] = ts
             
             # Extract credentials based on honeypot type
             if honeypot == "cowrie":
@@ -116,13 +137,28 @@ async def get_attacker_profile(
                         "password": ""
                     })
         
+        # Calculate session durations for this honeypot
+        honeypot_duration = 0.0
+        honeypot_session_count = len(sessions)
+        for sess_id, sess_times in sessions.items():
+            try:
+                first_dt = datetime.fromisoformat(sess_times["first"].replace("Z", "+00:00"))
+                last_dt = datetime.fromisoformat(sess_times["last"].replace("Z", "+00:00"))
+                duration = (last_dt - first_dt).total_seconds()
+                honeypot_duration += duration
+                all_session_durations.append(duration)
+            except:
+                pass
+        
         if timestamps:
             timestamps.sort()
             honeypot_activity.append(HoneypotActivity(
                 honeypot=honeypot,
                 event_count=len(events),
                 first_seen=timestamps[0],
-                last_seen=timestamps[-1]
+                last_seen=timestamps[-1],
+                duration_seconds=round(honeypot_duration, 2) if honeypot_duration else None,
+                session_count=honeypot_session_count if honeypot_session_count else None
             ))
     
     # Sort all timestamps
@@ -147,6 +183,21 @@ async def get_attacker_profile(
     # Deduplicate commands
     unique_commands = list(set(commands_executed))[:50]
     
+    # Calculate total duration metrics
+    total_duration = sum(all_session_durations) if all_session_durations else None
+    session_count = len(all_session_durations) if all_session_durations else None
+    avg_session_duration = (total_duration / session_count) if session_count and total_duration else None
+    
+    # Classify behavior: Script (fast, <5s avg), Human (longer sessions), Bot (repetitive)
+    behavior = None
+    if avg_session_duration is not None:
+        if avg_session_duration < 5:
+            behavior = "Script"  # Fast automated attacks
+        elif avg_session_duration > 60:
+            behavior = "Human"  # Longer exploratory sessions
+        else:
+            behavior = "Bot"  # Moderate duration, likely automated but interactive
+    
     return AttackerProfile(
         ip=ip,
         total_events=total_events,
@@ -155,7 +206,11 @@ async def get_attacker_profile(
         countries=list(countries),
         honeypot_activity=honeypot_activity,
         credentials_tried=unique_credentials if unique_credentials else None,
-        commands_executed=unique_commands if unique_commands else None
+        commands_executed=unique_commands if unique_commands else None,
+        total_duration_seconds=round(total_duration, 2) if total_duration else None,
+        avg_session_duration=round(avg_session_duration, 2) if avg_session_duration else None,
+        session_count=session_count,
+        behavior_classification=behavior
     )
 
 
@@ -458,12 +513,13 @@ async def get_attackers_by_country(
     for honeypot, index in HONEYPOT_INDICES.items():
         try:
             # Determine fields based on honeypot
+            # Note: For aggregations, text fields need .keyword suffix
             if honeypot == "cowrie":
-                ip_field = "cowrie.src_ip"
-                country_field = "cowrie.geo.country_name"
+                ip_field = "json.src_ip"
+                country_field = "source.geo.country_name"
             else:
                 ip_field = "source.ip"
-                country_field = "source.geo.country_name.keyword"
+                country_field = "source.geo.country_name"
             
             result = await es.search(
                 index=index,
@@ -525,14 +581,15 @@ async def get_country_attackers(
     for honeypot, index in HONEYPOT_INDICES.items():
         try:
             # Determine fields based on honeypot
+            # Note: For aggregations, text fields need .keyword suffix
             if honeypot == "cowrie":
-                ip_field = "cowrie.src_ip"
-                country_field = "cowrie.geo.country_name"
-                city_field = "cowrie.geo.city_name"
+                ip_field = "json.src_ip"
+                country_field = "source.geo.country_name"
+                city_field = "source.geo.city_name"
             else:
                 ip_field = "source.ip"
-                country_field = "source.geo.country_name.keyword"
-                city_field = "source.geo.city_name.keyword"
+                country_field = "source.geo.country_name"
+                city_field = "source.geo.city_name"
             
             result = await es.search(
                 index=index,
@@ -619,12 +676,13 @@ async def get_top_attackers_list(
     
     for honeypot, index in HONEYPOT_INDICES.items():
         try:
+            # Note: For aggregations, text fields need .keyword suffix
             if honeypot == "cowrie":
-                ip_field = "cowrie.src_ip"
-                country_field = "cowrie.geo.country_name"
+                ip_field = "json.src_ip"
+                country_field = "source.geo.country_name"
             else:
                 ip_field = "source.ip"
-                country_field = "source.geo.country_name.keyword"
+                country_field = "source.geo.country_name"
             
             result = await es.search(
                 index=index,

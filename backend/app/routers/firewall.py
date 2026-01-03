@@ -30,7 +30,7 @@ FIREWALL_TIMEZONE_OFFSET_HOURS = 1
 
 
 def adjust_firewall_timestamp(timestamp_str: Optional[str]) -> Optional[str]:
-    """Adjust firewall timestamp by adding the timezone offset."""
+    """Adjust firewall timestamp by adding the timezone offset for display."""
     if not timestamp_str:
         return timestamp_str
     try:
@@ -46,6 +46,39 @@ def adjust_firewall_timestamp(timestamp_str: Optional[str]) -> Optional[str]:
         return timestamp_str
 
 
+def get_firewall_time_range_query(time_range: str) -> dict:
+    """
+    Get time range query adjusted for firewall's 1-hour timestamp offset.
+    
+    Firewall logs are stored with timestamps 1 hour behind actual time.
+    To query "last 1 hour" of actual events, we need to look for timestamps
+    from 2 hours ago to 1 hour ago.
+    """
+    time_ranges = {
+        "1h": timedelta(hours=1),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    
+    delta = time_ranges.get(time_range, timedelta(hours=24))
+    now = datetime.utcnow()
+    
+    # Shift the time window back by 1 hour to account for offset
+    # "gte" should be: now - delta - offset
+    # "lte" should be: now - offset (not now, because logs are 1h behind)
+    offset = timedelta(hours=FIREWALL_TIMEZONE_OFFSET_HOURS)
+    
+    return {
+        "range": {
+            "@timestamp": {
+                "gte": (now - delta - offset).isoformat() + "Z",
+                "lte": now.isoformat() + "Z"  # Include up to now to catch any recent logs
+            }
+        }
+    }
+
+
 @router.get("/stats", response_model=StatsResponse)
 async def get_firewall_stats(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
@@ -58,7 +91,7 @@ async def get_firewall_stats(
     try:
         result = await es.search(
             index=INDEX,
-            query=es._get_time_range_query(time_range),
+            query=get_firewall_time_range_query(time_range),
             size=0,
             aggs={
                 "total": {"value_count": {"field": "@timestamp"}},
@@ -85,18 +118,35 @@ async def get_firewall_timeline(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get firewall event timeline."""
+    """Get firewall event timeline with 1-hour offset adjustment."""
     es = get_es_service()
     
     intervals = {"1h": "5m", "24h": "1h", "7d": "6h", "30d": "1d"}
     interval = intervals.get(time_range, "1h")
     
-    timeline = await es.get_timeline(INDEX, time_range, interval)
-    
-    return TimelineResponse(
-        data=[TimelinePoint(**point) for point in timeline],
-        time_range=time_range
+    # Use firewall-specific time range query
+    result = await es.search(
+        index=INDEX,
+        query=get_firewall_time_range_query(time_range),
+        size=0,
+        aggs={
+            "timeline": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": interval,
+                    "min_doc_count": 0
+                }
+            }
+        }
     )
+    
+    timeline = []
+    for bucket in result.get("aggregations", {}).get("timeline", {}).get("buckets", []):
+        # Adjust timestamp for display (add 1 hour back)
+        ts = adjust_firewall_timestamp(bucket.get("key_as_string"))
+        timeline.append(TimelinePoint(timestamp=ts or bucket.get("key_as_string", ""), count=bucket["doc_count"]))
+    
+    return TimelineResponse(data=timeline, time_range=time_range)
 
 
 @router.get("/geo", response_model=GeoDistributionResponse)
@@ -104,15 +154,27 @@ async def get_firewall_geo(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get firewall geographic distribution."""
+    """Get firewall geographic distribution with 1-hour offset adjustment."""
     es = get_es_service()
     
-    geo_data = await es.get_geo_distribution(INDEX, time_range)
-    
-    return GeoDistributionResponse(
-        data=[GeoPoint(**point) for point in geo_data],
-        time_range=time_range
+    # Use firewall-specific time range query
+    result = await es.search(
+        index=INDEX,
+        query=get_firewall_time_range_query(time_range),
+        size=0,
+        aggs={
+            "countries": {
+                "terms": {"field": "source.geo.country_name", "size": 50}
+            }
+        }
     )
+    
+    geo_data = [
+        GeoPoint(country=bucket["key"], count=bucket["doc_count"])
+        for bucket in result.get("aggregations", {}).get("countries", {}).get("buckets", [])
+    ]
+    
+    return GeoDistributionResponse(data=geo_data, time_range=time_range)
 
 
 @router.get("/top-attackers", response_model=TopAttackersResponse)
@@ -121,20 +183,39 @@ async def get_firewall_top_attackers(
     limit: int = Query(default=10, ge=1, le=100),
     _: str = Depends(get_current_user)
 ):
-    """Get top blocked IPs."""
+    """Get top blocked IPs with 1-hour offset adjustment."""
     es = get_es_service()
     
-    top_ips = await es.get_top_source_ips(INDEX, time_range, size=limit)
+    # Use firewall-specific time range query
+    result = await es.search(
+        index=INDEX,
+        query=get_firewall_time_range_query(time_range),
+        size=0,
+        aggs={
+            "top_ips": {
+                "terms": {"field": "fw.src_ip", "size": limit},
+                "aggs": {
+                    "geo": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["source.geo.country_name", "source.geo.city_name"]
+                        }
+                    }
+                }
+            }
+        }
+    )
     
-    attackers = [
-        TopAttacker(
-            ip=ip_data["ip"],
-            count=ip_data["count"],
-            country=ip_data.get("geo", {}).get("country_name"),
-            city=ip_data.get("geo", {}).get("city_name")
-        )
-        for ip_data in top_ips
-    ]
+    attackers = []
+    for bucket in result.get("aggregations", {}).get("top_ips", {}).get("buckets", []):
+        hits = bucket.get("geo", {}).get("hits", {}).get("hits", [])
+        geo = hits[0]["_source"].get("source", {}).get("geo", {}) if hits else {}
+        attackers.append(TopAttacker(
+            ip=bucket["key"],
+            count=bucket["doc_count"],
+            country=geo.get("country_name"),
+            city=geo.get("city_name")
+        ))
     
     return TopAttackersResponse(data=attackers, time_range=time_range)
 
@@ -153,7 +234,7 @@ async def get_blocked_traffic(
         query={
             "bool": {
                 "must": [
-                    es._get_time_range_query(time_range),
+                    get_firewall_time_range_query(time_range),
                     {"term": {"fw.action": "block"}}
                 ]
             }
@@ -219,7 +300,7 @@ async def get_firewall_events(
     """Get firewall events with details."""
     es = get_es_service()
     
-    must_clauses = [es._get_time_range_query(time_range)]
+    must_clauses = [get_firewall_time_range_query(time_range)]
     
     if action:
         must_clauses.append({"term": {"fw.action": action}})
@@ -286,7 +367,7 @@ async def get_port_scans(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "potential_scanners": {
@@ -351,7 +432,7 @@ async def get_repeat_offenders(
         query={
             "bool": {
                 "must": [
-                    es._get_time_range_query(time_range),
+                    get_firewall_time_range_query(time_range),
                     {"term": {"fw.action": "block"}}
                 ]
             }
@@ -416,7 +497,7 @@ async def get_firewall_actions(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "actions": {
@@ -457,7 +538,7 @@ async def get_internal_host_stats(
         query={
             "bool": {
                 "must": [
-                    es._get_time_range_query(time_range),
+                    get_firewall_time_range_query(time_range),
                     {"term": {"destination.ip": ip}}
                 ]
             }
@@ -474,7 +555,7 @@ async def get_internal_host_stats(
                 "terms": {"field": "network.transport.keyword", "size": 10}
             },
             "by_action": {
-                "terms": {"field": "fw.action.keyword", "size": 5}
+                "terms": {"field": "fw.action", "size": 5}
             },
             "top_sources": {
                 "terms": {"field": "source.ip", "size": 10},
@@ -597,7 +678,7 @@ async def get_firewall_port_stats(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "top_ports": {
@@ -649,7 +730,7 @@ async def get_firewall_protocol_stats(
     # Note: network.transport and network.direction are keyword-type in filebeat index
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "by_protocol": {
@@ -723,7 +804,7 @@ async def get_service_attack_summary(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "ports": {
@@ -785,7 +866,7 @@ async def get_attack_trends(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "timeline": {
@@ -830,14 +911,14 @@ async def get_firewall_rule_stats(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "by_rule": {
                 "terms": {"field": "fw.rule.keyword", "size": 30},
                 "aggs": {
                     "by_action": {
-                        "terms": {"field": "fw.action.keyword", "size": 5}
+                        "terms": {"field": "fw.action", "size": 5}
                     },
                     "unique_sources": {"cardinality": {"field": "source.ip"}}
                 }
@@ -877,7 +958,7 @@ async def get_firewall_action_timeline(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "over_time": {
@@ -891,7 +972,7 @@ async def get_firewall_action_timeline(
                 }
             },
             "totals": {
-                "terms": {"field": "fw.action.keyword", "size": 10}
+                "terms": {"field": "fw.action", "size": 10}
             }
         }
     )
@@ -924,13 +1005,13 @@ async def get_firewall_direction_stats(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "by_direction": {
                 "terms": {"field": "network.direction.keyword", "size": 5},
                 "aggs": {
-                    "by_action": {"terms": {"field": "fw.action.keyword", "size": 5}},
+                    "by_action": {"terms": {"field": "fw.action", "size": 5}},
                     "unique_sources": {"cardinality": {"field": "source.ip"}},
                     "top_ports": {"terms": {"field": "destination.port", "size": 5}}
                 }
@@ -997,7 +1078,7 @@ async def get_firewall_tcp_flags(
     result = await es.search(
         index=INDEX,
         query={"bool": {"must": [
-            es._get_time_range_query(time_range),
+            get_firewall_time_range_query(time_range),
             {"term": {"fw.proto": "tcp"}}
         ]}},
         size=1000,
@@ -1066,7 +1147,7 @@ async def get_firewall_ttl_analysis(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "ttl_distribution": {
@@ -1141,7 +1222,7 @@ async def get_firewall_packet_sizes(
     # fw.length is stored as string, so we need to aggregate by terms
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=get_firewall_time_range_query(time_range),
         size=0,
         aggs={
             "common_sizes": {
@@ -1214,4 +1295,146 @@ async def get_firewall_packet_sizes(
             "count": total_count
         },
         "common_sizes": common_sizes
+    }
+
+
+# Exposed ports from honeypots - the ports we ARE monitoring
+EXPOSED_PORTS = {
+    # Cowrie variants
+    22, 2222, 2223, 2224,
+    # RDPY
+    3389,
+    # Galah
+    80, 8080,
+    # Heralding
+    21, 23, 25, 110, 143, 443, 993, 995, 1080, 3306, 5432, 5900,
+    # Dionaea
+    42, 69, 135, 445, 1433, 1723, 1883, 1900, 5060, 5061, 11211,
+}
+
+# Port name mapping
+PORT_SERVICE_NAMES = {
+    20: "FTP-Data", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 42: "WINS",
+    53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP", 80: "HTTP", 110: "POP3",
+    123: "NTP", 135: "MSRPC", 137: "NetBIOS", 138: "NetBIOS", 139: "NetBIOS",
+    143: "IMAP", 161: "SNMP", 162: "SNMPTRAP", 179: "BGP", 389: "LDAP",
+    443: "HTTPS", 445: "SMB", 465: "SMTPS", 514: "Syslog", 515: "LPD",
+    587: "Submission", 636: "LDAPS", 993: "IMAPS", 995: "POP3S",
+    1080: "SOCKS", 1194: "OpenVPN", 1433: "MSSQL", 1521: "Oracle",
+    1723: "PPTP", 1883: "MQTT", 1900: "SSDP", 2049: "NFS",
+    2222: "SSH-Alt", 2223: "SSH-Alt", 2224: "SSH-Alt",
+    3306: "MySQL", 3389: "RDP", 3478: "STUN", 4443: "Pharos",
+    5060: "SIP", 5061: "SIPS", 5432: "PostgreSQL", 5555: "ADB",
+    5900: "VNC", 5984: "CouchDB", 6379: "Redis", 6443: "Kubernetes",
+    7001: "WebLogic", 8000: "HTTP-Alt", 8080: "HTTP-Proxy", 8443: "HTTPS-Alt",
+    8728: "MikroTik", 8883: "MQTTS", 9000: "SonarQube", 9200: "Elasticsearch",
+    9300: "ES-Transport", 9418: "Git", 10000: "Webmin", 11211: "Memcached",
+    27017: "MongoDB", 27018: "MongoDB", 27019: "MongoDB",
+}
+
+
+@router.get("/unexposed-attacks")
+async def get_unexposed_port_attacks(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get attacks on ports that are NOT exposed by our honeypots.
+    
+    This reveals attacker intent - what services they're looking for
+    that we're not currently monitoring.
+    """
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query=get_firewall_time_range_query(time_range),
+        size=0,
+        aggs={
+            "ports": {
+                "terms": {"field": "destination.port", "size": 500},
+                "aggs": {
+                    "unique_ips": {"cardinality": {"field": "source.ip"}},
+                    "protocols": {"terms": {"field": "network.transport.keyword", "size": 3}}
+                }
+            }
+        }
+    )
+    
+    unexposed_ports = []
+    exposed_ports = []
+    
+    for bucket in result.get("aggregations", {}).get("ports", {}).get("buckets", []):
+        port = bucket["key"]
+        count = bucket["doc_count"]
+        unique_ips = bucket["unique_ips"]["value"]
+        protocols = [p["key"] for p in bucket.get("protocols", {}).get("buckets", [])]
+        
+        service = PORT_SERVICE_NAMES.get(port, "Unknown")
+        
+        port_data = {
+            "port": port,
+            "service": service,
+            "attack_count": count,
+            "unique_attackers": unique_ips,
+            "protocols": protocols,
+            "is_exposed": port in EXPOSED_PORTS
+        }
+        
+        if port in EXPOSED_PORTS:
+            exposed_ports.append(port_data)
+        else:
+            unexposed_ports.append(port_data)
+    
+    # Sort unexposed by attack count
+    unexposed_ports.sort(key=lambda x: -x["attack_count"])
+    exposed_ports.sort(key=lambda x: -x["attack_count"])
+    
+    # Calculate summary stats
+    total_unexposed_attacks = sum(p["attack_count"] for p in unexposed_ports)
+    total_exposed_attacks = sum(p["attack_count"] for p in exposed_ports)
+    total_attacks = total_unexposed_attacks + total_exposed_attacks
+    
+    # Interesting findings - notable unexposed services being targeted
+    interesting_ports = {
+        53: "DNS - Possible amplification/reflection attacks",
+        123: "NTP - Time-based attacks, amplification",
+        161: "SNMP - Information disclosure",
+        179: "BGP - Network routing attacks",
+        389: "LDAP - Directory services exploitation",
+        514: "Syslog - Log injection",
+        1194: "OpenVPN - VPN infrastructure",
+        2049: "NFS - File system access",
+        5555: "ADB - Android device hijacking",
+        6379: "Redis - In-memory data store",
+        6443: "Kubernetes - Container orchestration",
+        7001: "WebLogic - Enterprise app server",
+        9200: "Elasticsearch - Data store exploitation",
+        27017: "MongoDB - NoSQL database",
+    }
+    
+    notable_findings = []
+    for port_data in unexposed_ports[:20]:
+        port = port_data["port"]
+        if port in interesting_ports:
+            notable_findings.append({
+                **port_data,
+                "insight": interesting_ports[port]
+            })
+    
+    return {
+        "time_range": time_range,
+        "summary": {
+            "total_attacks": total_attacks,
+            "unexposed_attacks": total_unexposed_attacks,
+            "exposed_attacks": total_exposed_attacks,
+            "unexposed_percentage": round(total_unexposed_attacks / total_attacks * 100, 1) if total_attacks > 0 else 0,
+            "unexposed_port_count": len(unexposed_ports),
+            "exposed_port_count": len(exposed_ports),
+        },
+        "unexposed_ports": unexposed_ports[:limit],
+        "exposed_ports": exposed_ports[:10],  # Top 10 exposed for comparison
+        "notable_findings": notable_findings,
+        "exposed_port_list": sorted(list(EXPOSED_PORTS))
     }

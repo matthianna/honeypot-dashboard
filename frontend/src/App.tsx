@@ -10,8 +10,10 @@ import Galah from './pages/Galah';
 import RDPY from './pages/RDPY';
 import Heralding from './pages/Heralding';
 import Firewall from './pages/Firewall';
-import Analytics from './pages/Analytics';
+import AnalyticsOld from './pages/Analytics';
+import AnalyticsDashboard from './pages/analytics';
 import Attackers from './pages/Attackers';
+import Report from './pages/Report';
 import LoadingSpinner from './components/LoadingSpinner';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -46,7 +48,8 @@ function App() {
       >
         <Route index element={<Dashboard />} />
         <Route path="attack-map" element={<AttackMap />} />
-        <Route path="analytics" element={<Analytics />} />
+        <Route path="analytics-old" element={<AnalyticsOld />} />
+        <Route path="analytics/*" element={<AnalyticsDashboard />} />
         <Route path="cowrie" element={<Cowrie />} />
         <Route path="dionaea" element={<Dionaea />} />
         <Route path="galah" element={<Galah />} />
@@ -54,6 +57,7 @@ function App() {
         <Route path="heralding" element={<Heralding />} />
         <Route path="firewall" element={<Firewall />} />
         <Route path="attackers" element={<Attackers />} />
+        <Route path="report" element={<Report />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

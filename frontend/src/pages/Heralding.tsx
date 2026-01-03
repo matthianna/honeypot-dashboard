@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { BarChart2, Clock, Map, Key, Network, TrendingUp, Zap } from 'lucide-react';
+import { BarChart2, Clock, Map, Key, Network, TrendingUp, Zap, Shield, AlertTriangle, Users } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -71,6 +71,21 @@ export default function Heralding() {
 
   const { data: credentialVelocity, loading: credentialVelocityLoading } = useApiWithRefresh(
     useCallback(() => api.getHeraldingCredentialVelocity(timeRange), [timeRange]),
+    [timeRange]
+  );
+
+  const { data: passwordAnalysis, loading: passwordAnalysisLoading } = useApiWithRefresh(
+    useCallback(() => api.getHeraldingPasswordAnalysis(timeRange), [timeRange]),
+    [timeRange]
+  );
+
+  const { data: bruteForce, loading: bruteForceLoading } = useApiWithRefresh(
+    useCallback(() => api.getHeraldingBruteForceDetection(timeRange), [timeRange]),
+    [timeRange]
+  );
+
+  const { data: credentialReuse, loading: credentialReuseLoading } = useApiWithRefresh(
+    useCallback(() => api.getHeraldingCredentialReuse(timeRange), [timeRange]),
     [timeRange]
   );
 
@@ -180,6 +195,84 @@ export default function Heralding() {
             </CardContent>
           </Card>
 
+          {/* Protocol Distribution Charts */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Protocol Bar Chart */}
+            <Card>
+              <CardHeader title="Protocol Distribution" subtitle="Attack events by protocol" icon={<BarChart2 className="w-5 h-5" />} />
+              <CardContent>
+                {protocolsLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={protocols || []} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis type="number" stroke="#888888" />
+                        <YAxis 
+                          dataKey="protocol" 
+                          type="category" 
+                          stroke="#888888" 
+                          width={80}
+                          tick={{ fill: '#ff3366', fontSize: 11, fontFamily: 'monospace' }}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Events']}
+                        />
+                        <Bar 
+                          dataKey="count" 
+                          fill="#ff3366"
+                          radius={[0, 4, 4, 0]}
+                        >
+                          {(protocols || []).map((_, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Protocol Pie Chart */}
+            <Card>
+              <CardHeader title="Protocol Share" subtitle="Percentage breakdown" icon={<Network className="w-5 h-5" />} />
+              <CardContent>
+                {protocolsLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={protocols || []}
+                          dataKey="count"
+                          nameKey="protocol"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={80}
+                          label={({ protocol, percent }) => `${protocol} ${(percent * 100).toFixed(0)}%`}
+                          labelLine={false}
+                        >
+                          {(protocols || []).map((_, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          formatter={(value: number, name: string) => [value.toLocaleString(), name]}
+                        />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
           <Card>
             <CardHeader title="Protocols" icon={<Network className="w-5 h-5" />} />
             <CardContent className="p-0">
@@ -205,49 +298,415 @@ export default function Heralding() {
       ),
     },
     {
-      id: 'protocols',
-      label: 'Protocols',
-      icon: <Network className="w-4 h-4" />,
+      id: 'password-analysis',
+      label: 'Password Analysis',
+      icon: <Shield className="w-4 h-4" />,
       content: (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {passwordAnalysisLoading ? (
+              <div className="col-span-4 h-24 flex items-center justify-center"><LoadingSpinner /></div>
+            ) : (
+              <>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-blue">{passwordAnalysis?.total_unique_passwords || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Unique Passwords</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-green">{passwordAnalysis?.total_attempts?.toLocaleString() || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Total Attempts</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-orange">{passwordAnalysis?.avg_password_length || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Avg Password Length</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-red">{passwordAnalysis?.common_password_percentage || 0}%</div>
+                  <div className="text-xs text-text-secondary mt-1">Common Passwords</div>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Password Strength Distribution */}
+            <Card>
+              <CardHeader title="Password Strength Distribution" subtitle="Security level of attempted passwords" icon={<Shield className="w-5 h-5" />} />
+              <CardContent>
+                {passwordAnalysisLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={[
+                            { name: 'Very Weak', value: passwordAnalysis?.strength_distribution?.very_weak || 0, fill: '#ff3366' },
+                            { name: 'Weak', value: passwordAnalysis?.strength_distribution?.weak || 0, fill: '#ff6600' },
+                            { name: 'Moderate', value: passwordAnalysis?.strength_distribution?.moderate || 0, fill: '#ffff00' },
+                            { name: 'Strong', value: passwordAnalysis?.strength_distribution?.strong || 0, fill: '#39ff14' },
+                            { name: 'Very Strong', value: passwordAnalysis?.strength_distribution?.very_strong || 0, fill: '#00d4ff' },
+                          ].filter(d => d.value > 0)}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={40}
+                          outerRadius={80}
+                          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Attempts']}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Top Common Passwords from Wordlist */}
+            <Card>
+              <CardHeader title="Common Passwords Detected" subtitle="Matched against RockYou wordlist" icon={<AlertTriangle className="w-5 h-5 text-neon-red" />} />
+              <CardContent>
+                {passwordAnalysisLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (passwordAnalysis?.top_common_passwords?.length || 0) > 0 ? (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {passwordAnalysis?.top_common_passwords?.slice(0, 15).map((pwd, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg hover:bg-bg-hover transition-colors">
+                        <div className="flex items-center gap-3">
+                          <span className="text-text-muted w-6 text-right">{idx + 1}.</span>
+                          <code className="text-sm text-neon-red font-mono">{pwd.password}</code>
+                          <span className="px-2 py-0.5 text-xs bg-neon-red/20 text-neon-red rounded">Common</span>
+                        </div>
+                        <span className="text-sm text-text-secondary">{pwd.count} uses</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-text-muted text-center py-4">No common passwords detected</p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Top Passwords Table */}
           <Card>
-            <CardHeader title="Protocol Distribution" />
+            <CardHeader title="Top Passwords by Usage" subtitle="Most frequently attempted passwords" icon={<Key className="w-5 h-5" />} />
             <CardContent>
-              {protocolsLoading ? (
+              {passwordAnalysisLoading ? (
+                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-bg-hover">
+                    <thead className="bg-bg-card">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">#</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Password</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Strength</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Length</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Attempts</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bg-hover/50">
+                      {passwordAnalysis?.top_passwords?.slice(0, 20).map((pwd, idx) => {
+                        const strengthColors: Record<string, string> = {
+                          very_weak: 'text-neon-red bg-neon-red/20',
+                          weak: 'text-neon-orange bg-neon-orange/20',
+                          moderate: 'text-yellow-400 bg-yellow-400/20',
+                          strong: 'text-neon-green bg-neon-green/20',
+                          very_strong: 'text-neon-blue bg-neon-blue/20',
+                        };
+                        return (
+                          <tr key={idx} className="hover:bg-bg-secondary transition-colors">
+                            <td className="px-4 py-2 text-text-muted">{idx + 1}</td>
+                            <td className="px-4 py-2">
+                              <code className="font-mono text-neon-orange">{pwd.password}</code>
+                              {pwd.strength.is_common && (
+                                <span className="ml-2 px-2 py-0.5 text-xs bg-neon-red/20 text-neon-red rounded">Wordlist</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2">
+                              <span className={`px-2 py-1 text-xs rounded ${strengthColors[pwd.strength.category] || ''}`}>
+                                {pwd.strength.category.replace('_', ' ')}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-text-secondary">{pwd.strength.length}</td>
+                            <td className="px-4 py-2 font-mono text-neon-green">{pwd.count.toLocaleString()}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      ),
+    },
+    {
+      id: 'brute-force',
+      label: 'Brute Force',
+      icon: <AlertTriangle className="w-4 h-4" />,
+      content: (
+        <div className="space-y-6">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {bruteForceLoading ? (
+              <div className="col-span-4 h-24 flex items-center justify-center"><LoadingSpinner /></div>
+            ) : (
+              <>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-red">{bruteForce?.total_brute_force_ips || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Brute Force IPs</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-red">{bruteForce?.aggressive_attackers || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Aggressive (&gt;50/min)</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-orange">{bruteForce?.moderate_attackers || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Moderate (10-50/min)</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-green">{bruteForce?.slow_attackers || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Slow (&lt;10/min)</div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Brute Force Attackers Table */}
+          <Card>
+            <CardHeader title="Brute Force Attackers" subtitle="IPs with rapid credential attempts" icon={<AlertTriangle className="w-5 h-5 text-neon-red" />} />
+            <CardContent>
+              {bruteForceLoading ? (
                 <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
               ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={protocols || []} dataKey="count" nameKey="protocol" cx="50%" cy="50%" outerRadius={80} label>
-                        {protocols?.map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-bg-hover">
+                    <thead className="bg-bg-card">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">IP</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Intensity</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Attempts</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Rate/min</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Sessions</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Protocols</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Location</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bg-hover/50">
+                      {bruteForce?.brute_forcers?.slice(0, 25).map((attacker, idx) => {
+                        const intensityColors: Record<string, string> = {
+                          aggressive: 'text-neon-red bg-neon-red/20',
+                          moderate: 'text-neon-orange bg-neon-orange/20',
+                          slow: 'text-neon-green bg-neon-green/20',
+                        };
+                        return (
+                          <tr key={idx} className="hover:bg-bg-secondary transition-colors">
+                            <td className="px-4 py-2 font-mono text-neon-blue">{attacker.ip}</td>
+                            <td className="px-4 py-2">
+                              <span className={`px-2 py-1 text-xs rounded ${intensityColors[attacker.intensity] || ''}`}>
+                                {attacker.intensity}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-neon-red">{attacker.total_attempts.toLocaleString()}</td>
+                            <td className="px-4 py-2 text-right text-text-secondary">{attacker.attempts_per_minute}</td>
+                            <td className="px-4 py-2 text-right text-text-secondary">{attacker.session_count}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex gap-1 flex-wrap">
+                                {attacker.protocols.slice(0, 3).map((proto) => (
+                                  <span key={proto} className="px-2 py-0.5 text-xs bg-bg-secondary text-text-primary rounded">{proto}</span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 text-sm text-text-secondary">
+                              {attacker.geo?.country || 'Unknown'}
+                              {attacker.geo?.city && <span className="text-text-muted"> / {attacker.geo.city}</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </CardContent>
           </Card>
 
+          {/* Credential Reuse */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader title="Passwords Used by Multiple IPs" subtitle="Coordinated attack indicator" icon={<Users className="w-5 h-5" />} />
+              <CardContent>
+                {credentialReuseLoading ? (
+                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (credentialReuse?.reused_passwords?.length || 0) > 0 ? (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {credentialReuse?.reused_passwords?.slice(0, 15).map((item, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
+                        <code className="text-sm text-neon-orange font-mono">{item.password}</code>
+                        <span className="px-2 py-1 text-xs bg-neon-purple/20 text-neon-purple rounded">
+                          {item.ip_count} IPs
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-text-muted text-center py-4">No reused passwords detected</p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader title="Usernames Used by Multiple IPs" subtitle="Common target accounts" icon={<Users className="w-5 h-5" />} />
+              <CardContent>
+                {credentialReuseLoading ? (
+                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (credentialReuse?.reused_usernames?.length || 0) > 0 ? (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {credentialReuse?.reused_usernames?.slice(0, 15).map((item, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
+                        <code className="text-sm text-neon-blue font-mono">{item.username}</code>
+                        <span className="px-2 py-1 text-xs bg-neon-purple/20 text-neon-purple rounded">
+                          {item.ip_count} IPs
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-text-muted text-center py-4">No reused usernames detected</p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: 'protocols',
+      label: 'Protocols',
+      icon: <Network className="w-4 h-4" />,
+      content: (
+        <div className="space-y-6">
+          {/* Protocol Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {protocolDetailsLoading ? (
+              <div className="col-span-4 h-24 flex items-center justify-center"><LoadingSpinner /></div>
+            ) : (
+              <>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-red">{protocolDetails?.protocols?.length || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Protocols Targeted</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-green">{protocolDetails?.protocols?.reduce((sum, p) => sum + p.sessions, 0).toLocaleString() || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Total Sessions</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-blue">{protocolDetails?.protocols?.[0]?.protocol?.toUpperCase() || 'N/A'}</div>
+                  <div className="text-xs text-text-secondary mt-1">Most Targeted</div>
+                </div>
+                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+                  <div className="text-2xl font-bold text-neon-orange">{protocolDetails?.protocols?.reduce((sum, p) => sum + p.total_auth_attempts, 0).toLocaleString() || 0}</div>
+                  <div className="text-xs text-text-secondary mt-1">Auth Attempts</div>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader title="Protocol Distribution" subtitle="Breakdown of attack attempts per protocol" />
+              <CardContent>
+                {protocolsLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={protocols || []} dataKey="count" nameKey="protocol" cx="50%" cy="50%" innerRadius={40} outerRadius={80} label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}>
+                          {protocols?.map((_, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader title="Protocol Activity" subtitle="Comparison of attack volume by protocol" />
+              <CardContent>
+                {protocolsLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={protocols || []} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis type="number" stroke="#888888" />
+                        <YAxis type="category" dataKey="protocol" stroke="#888888" tick={{ fill: '#888888', fontSize: 12 }} width={60} />
+                        <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
+                        <Bar dataKey="count" fill="#ff3366" radius={[0, 4, 4, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Detailed Protocol Stats */}
           <Card>
-            <CardHeader title="Protocol Activity" />
+            <CardHeader title="Protocol Details" subtitle="Detailed metrics per protocol" icon={<Network className="w-5 h-5" />} />
             <CardContent>
-              {protocolsLoading ? (
+              {protocolDetailsLoading ? (
                 <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
               ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={protocols || []}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                      <XAxis dataKey="protocol" stroke="#888888" />
-                      <YAxis stroke="#888888" />
-                      <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
-                      <Bar dataKey="count" fill="#ff3366" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-bg-hover">
+                    <thead className="bg-bg-card">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Protocol</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Sessions</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Unique IPs</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Auth Attempts</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Avg Duration</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Port</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bg-hover/50">
+                      {protocolDetails?.protocols?.map((proto, idx) => {
+                        const totalSessions = protocolDetails?.protocols?.reduce((sum, p) => sum + p.sessions, 0) || 1;
+                        const percentage = ((proto.sessions / totalSessions) * 100).toFixed(1);
+                        return (
+                          <tr key={idx} className="hover:bg-bg-secondary transition-colors">
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[idx % COLORS.length] }} />
+                                <span className="font-mono text-text-primary uppercase">{proto.protocol}</span>
+                                <span className="text-xs text-text-muted">({percentage}%)</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono text-neon-red">{proto.sessions.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right font-mono text-neon-blue">{proto.unique_ips}</td>
+                            <td className="px-4 py-3 text-right font-mono text-neon-green">{proto.total_auth_attempts.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right font-mono text-text-secondary">{proto.avg_duration.toFixed(1)}s</td>
+                            <td className="px-4 py-3 text-right font-mono text-neon-orange">{proto.ports.join(', ')}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </CardContent>
