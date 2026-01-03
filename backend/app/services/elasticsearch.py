@@ -217,6 +217,7 @@ class ElasticsearchService:
     async def get_unique_ips(self, index: str, time_range: str = "24h", exclude_internal: bool = True) -> int:
         """Get unique source IP count for an index, excluding internal IPs and noise."""
         src_ip_field = self._get_field(index, "src_ip")
+        honeypot = self._get_honeypot_from_index(index)
         
         try:
             must_clauses = [self._get_time_range_query(time_range)]
@@ -231,21 +232,32 @@ class ElasticsearchService:
             if exclude_internal:
                 query["bool"]["must_not"] = self._get_internal_ip_exclusion(index)
             
+            # For cowrie, aggregate both old (json.src_ip) and new (cowrie.src_ip) field structures
+            aggs = {}
+            if honeypot == "cowrie":
+                aggs = {
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}}
+                }
+            else:
+                aggs = {"unique_ips": {"cardinality": {"field": src_ip_field}}}
+            
             result = await self.client.search(
                 index=index,
                 body={
                     "size": 0,
                     "query": query,
-                    "aggs": {
-                        "unique_ips": {
-                            "cardinality": {
-                                "field": src_ip_field
-                            }
-                        }
-                    }
+                    "aggs": aggs
                 }
             )
-            return result["aggregations"]["unique_ips"]["value"]
+            
+            if honeypot == "cowrie":
+                # Combine results from both field structures
+                old_count = result["aggregations"].get("unique_ips_old", {}).get("value", 0)
+                new_count = result["aggregations"].get("unique_ips_new", {}).get("value", 0)
+                return max(old_count, new_count)  # Use max since they represent the same data
+            else:
+                return result["aggregations"]["unique_ips"]["value"]
         except Exception as e:
             logger.error("elasticsearch_unique_ips_failed", index=index, error=str(e))
             return 0

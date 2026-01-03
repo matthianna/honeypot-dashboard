@@ -133,4 +133,3 @@ export async function exportToPNG(elementId: string, filename: string) {
   link.click();
 }
 
-

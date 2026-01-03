@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str
     
-    # CORS
-    cors_origins: str = "http://localhost:3000"
+    # CORS - Allow all origins for development/thesis
+    cors_origins: str = "*"
     
     # Rate limiting
     rate_limit_per_minute: int = 100

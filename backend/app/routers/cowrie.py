@@ -89,14 +89,22 @@ async def get_duration_stats(es, time_range: str, variant_filter: Optional[str] 
 
 
 async def get_top_commands_by_variant(es, time_range: str, variant: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Get top commands for a specific variant."""
+    """Get top commands for a specific variant. Supports both old and new field structures."""
     result = await es.search(
         index=INDEX,
         query={
             "bool": {
                 "must": [
                     es._get_time_range_query(time_range),
-                    {"term": {"json.eventid": "cowrie.command.input"}},
+                    {
+                        "bool": {
+                            "should": [
+                                {"term": {"json.eventid": "cowrie.command.input"}},
+                                {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                            ],
+                            "minimum_should_match": 1
+                        }
+                    },
                     {"term": {"cowrie_variant": variant}}
                 ]
             }
@@ -262,50 +270,44 @@ async def get_cowrie_sessions(
     # Request more sessions if we're going to filter client-side
     fetch_size = limit * 5 if min_duration is not None or has_commands is not None else limit
     
+    # Support both old (json.session) and new (cowrie.session) field structures
     result = await es.search(
         index=INDEX,
         query=query,
         size=0,
         aggs={
-            "sessions": {
-                "terms": {
-                    "field": "json.session",
-                    "size": fetch_size
-                },
+            "sessions_old": {
+                "terms": {"field": "json.session", "size": fetch_size},
                 "aggs": {
-                    "src_ip": {
-                        "top_hits": {
-                            "size": 1,
-                            "_source": ["json.src_ip", "source.geo.country_name", "cowrie_variant"]
-                        }
-                    },
-                    "start_time": {
-                        "min": {"field": "@timestamp"}
-                    },
-                    "end_time": {
-                        "max": {"field": "@timestamp"}
-                    },
-                    "commands": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.command.input"}
-                        }
-                    },
-                    "login_success": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.login.success"}
-                        }
-                    }
+                    "src_ip": {"top_hits": {"size": 1, "_source": ["json.src_ip", "source.geo.country_name", "cowrie_variant"]}},
+                    "start_time": {"min": {"field": "@timestamp"}},
+                    "end_time": {"max": {"field": "@timestamp"}},
+                    "commands": {"filter": {"term": {"json.eventid": "cowrie.command.input"}}},
+                    "login_success": {"filter": {"term": {"json.eventid": "cowrie.login.success"}}}
+                }
+            },
+            "sessions_new": {
+                "terms": {"field": "cowrie.session", "size": fetch_size},
+                "aggs": {
+                    "src_ip": {"top_hits": {"size": 1, "_source": ["cowrie.src_ip", "cowrie.geo.country_name", "cowrie_variant"]}},
+                    "start_time": {"min": {"field": "@timestamp"}},
+                    "end_time": {"max": {"field": "@timestamp"}},
+                    "commands": {"filter": {"term": {"cowrie.eventid": "cowrie.command.input"}}},
+                    "login_success": {"filter": {"term": {"cowrie.eventid": "cowrie.login.success"}}}
                 }
             }
         }
     )
     
     sessions = []
-    for bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+    
+    # Process old format sessions
+    for bucket in result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []):
         hit = bucket["src_ip"]["hits"]["hits"][0]["_source"] if bucket["src_ip"]["hits"]["hits"] else {}
-        # New structure: json.* for Cowrie fields, source.geo.* for GeoIP
         json_data = hit.get("json", {})
         geo_data = hit.get("source", {}).get("geo", {})
+        src_ip = json_data.get("src_ip", "unknown")
+        country = geo_data.get("country_name")
         
         start = bucket["start_time"]["value_as_string"] if bucket["start_time"].get("value_as_string") else None
         end = bucket["end_time"]["value_as_string"] if bucket["end_time"].get("value_as_string") else None
@@ -322,12 +324,52 @@ async def get_cowrie_sessions(
         
         session = CowrieSession(
             session_id=bucket["key"],
-            src_ip=json_data.get("src_ip", "unknown"),
+            src_ip=src_ip,
             start_time=start or "",
             end_time=end,
             duration=duration,
             commands_count=bucket["commands"]["doc_count"],
-            country=geo_data.get("country_name"),
+            country=country,
+            sensor=hit.get("cowrie_variant") or hit.get("observer", {}).get("name")
+        )
+        
+        if min_duration is not None and (session.duration is None or session.duration < min_duration):
+            continue
+        if has_commands is not None:
+            if has_commands and session.commands_count == 0:
+                continue
+            if not has_commands and session.commands_count > 0:
+                continue
+        sessions.append(session)
+    
+    # Process new format sessions
+    for bucket in result.get("aggregations", {}).get("sessions_new", {}).get("buckets", []):
+        hit = bucket["src_ip"]["hits"]["hits"][0]["_source"] if bucket["src_ip"]["hits"]["hits"] else {}
+        cowrie_data = hit.get("cowrie", {})
+        src_ip = cowrie_data.get("src_ip", "unknown")
+        country = cowrie_data.get("geo", {}).get("country_name")
+        
+        start = bucket["start_time"]["value_as_string"] if bucket["start_time"].get("value_as_string") else None
+        end = bucket["end_time"]["value_as_string"] if bucket["end_time"].get("value_as_string") else None
+        
+        duration = None
+        if start and end:
+            try:
+                from datetime import datetime
+                start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                duration = (end_dt - start_dt).total_seconds()
+            except:
+                pass
+        
+        session = CowrieSession(
+            session_id=bucket["key"],
+            src_ip=src_ip,
+            start_time=start or "",
+            end_time=end,
+            duration=duration,
+            commands_count=bucket["commands"]["doc_count"],
+            country=country,
             sensor=hit.get("cowrie_variant") or hit.get("observer", {}).get("name")
         )
         
@@ -438,14 +480,16 @@ async def get_cowrie_credentials(
     """Get most common credential attempts."""
     es = get_es_service()
     
-    # Build query for login events
+    # Build query for login events - support both old and new field structures
     must_clauses = [
         es._get_time_range_query(time_range),
         {
             "bool": {
                 "should": [
                     {"term": {"json.eventid": "cowrie.login.success"}},
-                    {"term": {"json.eventid": "cowrie.login.failed"}}
+                    {"term": {"json.eventid": "cowrie.login.failed"}},
+                    {"term": {"cowrie.eventid": "cowrie.login.success"}},
+                    {"term": {"cowrie.eventid": "cowrie.login.failed"}}
                 ],
                 "minimum_should_match": 1
             }
@@ -463,16 +507,20 @@ async def get_cowrie_credentials(
         sort=[{"@timestamp": "desc"}]
     )
     
-    # Aggregate credentials manually - new structure uses json.* fields
+    # Aggregate credentials manually - support both old (json.*) and new (cowrie.*) field structures
     cred_counts = {}
     for hit in result.get("hits", {}).get("hits", []):
         source = hit["_source"]
         json_data = source.get("json", {})
+        cowrie_data = source.get("cowrie", {})
         
-        # Username/password in json.*
+        # Username/password in json.* (both old and new formats use json for the actual data)
         username = json_data.get("username", "")
         password = json_data.get("password", "")
-        success = json_data.get("eventid") == "cowrie.login.success"
+        
+        # Check eventid in both old and new locations
+        eventid = json_data.get("eventid") or cowrie_data.get("eventid", "")
+        success = eventid == "cowrie.login.success"
         
         if username:
             key = (username, password, success)
@@ -501,9 +549,18 @@ async def get_cowrie_commands(
     """Get most common commands executed."""
     es = get_es_service()
     
+    # Support both old and new field structures
     must_clauses = [
         es._get_time_range_query(time_range),
-        {"term": {"json.eventid": "cowrie.command.input"}}
+        {
+            "bool": {
+                "should": [
+                    {"term": {"json.eventid": "cowrie.command.input"}},
+                    {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
     ]
     
     if variant:
@@ -733,6 +790,7 @@ async def get_cowrie_variants(
     es = get_es_service()
     
     # Aggregate by cowrie_variant field which identifies the sensor type
+    # Support both old (json.*) and new (cowrie.*) field structures
     result = await es.search(
         index=INDEX,
         query=es._get_time_range_query(time_range),
@@ -744,31 +802,34 @@ async def get_cowrie_variants(
                     "size": 10
                 },
                 "aggs": {
-                    "unique_ips": {
-                        "cardinality": {"field": "json.src_ip"}
+                    # Support both old and new field structures
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
+                    "sessions_old": {"cardinality": {"field": "json.session"}},
+                    "sessions_new": {"cardinality": {"field": "cowrie.session"}},
+                    "commands_old": {
+                        "filter": {"term": {"json.eventid": "cowrie.command.input"}}
                     },
-                    "sessions": {
-                        "cardinality": {"field": "json.session"}
+                    "commands_new": {
+                        "filter": {"term": {"cowrie.eventid": "cowrie.command.input"}}
                     },
-                    "commands": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.command.input"}
-                        }
+                    "login_success_old": {
+                        "filter": {"term": {"json.eventid": "cowrie.login.success"}}
                     },
-                    "login_success": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.login.success"}
-                        }
+                    "login_success_new": {
+                        "filter": {"term": {"cowrie.eventid": "cowrie.login.success"}}
                     },
-                    "login_failed": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.login.failed"}
-                        }
+                    "login_failed_old": {
+                        "filter": {"term": {"json.eventid": "cowrie.login.failed"}}
                     },
-                    "file_downloads": {
-                        "filter": {
-                            "term": {"json.eventid": "cowrie.session.file_download"}
-                        }
+                    "login_failed_new": {
+                        "filter": {"term": {"cowrie.eventid": "cowrie.login.failed"}}
+                    },
+                    "file_downloads_old": {
+                        "filter": {"term": {"json.eventid": "cowrie.session.file_download"}}
+                    },
+                    "file_downloads_new": {
+                        "filter": {"term": {"cowrie.eventid": "cowrie.session.file_download"}}
                     }
                 }
             }
@@ -777,9 +838,33 @@ async def get_cowrie_variants(
     
     variants = []
     for bucket in result.get("aggregations", {}).get("variants", {}).get("buckets", []):
+        # Combine old and new field values (use max since they're the same data in different formats)
+        unique_ips = max(
+            bucket.get("unique_ips_old", {}).get("value", 0),
+            bucket.get("unique_ips_new", {}).get("value", 0)
+        )
+        sessions = max(
+            bucket.get("sessions_old", {}).get("value", 0),
+            bucket.get("sessions_new", {}).get("value", 0)
+        )
+        commands = (
+            bucket.get("commands_old", {}).get("doc_count", 0) +
+            bucket.get("commands_new", {}).get("doc_count", 0)
+        )
+        login_success = (
+            bucket.get("login_success_old", {}).get("doc_count", 0) +
+            bucket.get("login_success_new", {}).get("doc_count", 0)
+        )
+        login_failed = (
+            bucket.get("login_failed_old", {}).get("doc_count", 0) +
+            bucket.get("login_failed_new", {}).get("doc_count", 0)
+        )
+        file_downloads = (
+            bucket.get("file_downloads_old", {}).get("doc_count", 0) +
+            bucket.get("file_downloads_new", {}).get("doc_count", 0)
+        )
+        
         # Calculate login success rate
-        login_success = bucket["login_success"]["doc_count"]
-        login_failed = bucket["login_failed"]["doc_count"]
         total_logins = login_success + login_failed
         success_rate = (login_success / total_logins * 100) if total_logins > 0 else 0
         
@@ -799,13 +884,13 @@ async def get_cowrie_variants(
             "variant": variant_key,
             "display_name": display_name,
             "total_events": bucket["doc_count"],
-            "unique_ips": bucket["unique_ips"]["value"],
-            "sessions_count": bucket["sessions"]["value"],
-            "commands_count": bucket["commands"]["doc_count"],
+            "unique_ips": unique_ips,
+            "sessions_count": sessions,
+            "commands_count": commands,
             "login_success": login_success,
             "login_failed": login_failed,
             "success_rate": round(success_rate, 1),
-            "file_downloads": bucket["file_downloads"]["doc_count"],
+            "file_downloads": file_downloads,
             "avg_session_duration": duration_stats["avg"],
         })
     
@@ -896,6 +981,7 @@ async def get_cowrie_variant_comparison(
     """
     es = get_es_service()
     
+    # Support both old (json.*) and new (cowrie.*) field structures
     result = await es.search(
         index=INDEX,
         query=es._get_time_range_query(time_range),
@@ -904,33 +990,28 @@ async def get_cowrie_variant_comparison(
             "by_variant": {
                 "terms": {"field": "cowrie_variant", "size": 10},
                 "aggs": {
-                    # Session metrics
-                    "session_count": {
-                        "cardinality": {"field": "json.session"}
-                    },
-                    "unique_ips": {
-                        "cardinality": {"field": "json.src_ip"}
-                    },
-                    # Login metrics
-                    "login_success": {
-                        "filter": {"term": {"json.eventid": "cowrie.login.success"}}
-                    },
-                    "login_failed": {
-                        "filter": {"term": {"json.eventid": "cowrie.login.failed"}}
-                    },
-                    # Command metrics
-                    "commands": {
+                    # Session metrics - both old and new formats
+                    "session_count_old": {"cardinality": {"field": "json.session"}},
+                    "session_count_new": {"cardinality": {"field": "cowrie.session"}},
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
+                    # Login metrics - both formats
+                    "login_success_old": {"filter": {"term": {"json.eventid": "cowrie.login.success"}}},
+                    "login_success_new": {"filter": {"term": {"cowrie.eventid": "cowrie.login.success"}}},
+                    "login_failed_old": {"filter": {"term": {"json.eventid": "cowrie.login.failed"}}},
+                    "login_failed_new": {"filter": {"term": {"cowrie.eventid": "cowrie.login.failed"}}},
+                    # Command metrics - both formats
+                    "commands_old": {
                         "filter": {"term": {"json.eventid": "cowrie.command.input"}},
-                        "aggs": {
-                            "unique_commands": {
-                                "cardinality": {"field": "json.input"}
-                            }
-                        }
+                        "aggs": {"unique_commands": {"cardinality": {"field": "json.input"}}}
                     },
-                    # Downloads
-                    "downloads": {
-                        "filter": {"term": {"json.eventid": "cowrie.session.file_download"}}
+                    "commands_new": {
+                        "filter": {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                        "aggs": {"unique_commands": {"cardinality": {"field": "json.input"}}}
                     },
+                    # Downloads - both formats
+                    "downloads_old": {"filter": {"term": {"json.eventid": "cowrie.session.file_download"}}},
+                    "downloads_new": {"filter": {"term": {"cowrie.eventid": "cowrie.session.file_download"}}},
                     # Timeline for comparison
                     "hourly": {
                         "date_histogram": {
@@ -945,11 +1026,37 @@ async def get_cowrie_variant_comparison(
     
     comparison = []
     for bucket in result.get("aggregations", {}).get("by_variant", {}).get("buckets", []):
-        login_success = bucket["login_success"]["doc_count"]
-        login_failed = bucket["login_failed"]["doc_count"]
+        # Combine old and new format values
+        login_success = (
+            bucket.get("login_success_old", {}).get("doc_count", 0) +
+            bucket.get("login_success_new", {}).get("doc_count", 0)
+        )
+        login_failed = (
+            bucket.get("login_failed_old", {}).get("doc_count", 0) +
+            bucket.get("login_failed_new", {}).get("doc_count", 0)
+        )
         total_logins = login_success + login_failed
         
-        commands_data = bucket.get("commands", {})
+        commands_count = (
+            bucket.get("commands_old", {}).get("doc_count", 0) +
+            bucket.get("commands_new", {}).get("doc_count", 0)
+        )
+        unique_commands = (
+            bucket.get("commands_old", {}).get("unique_commands", {}).get("value", 0) +
+            bucket.get("commands_new", {}).get("unique_commands", {}).get("value", 0)
+        )
+        unique_ips = max(
+            bucket.get("unique_ips_old", {}).get("value", 0),
+            bucket.get("unique_ips_new", {}).get("value", 0)
+        )
+        sessions = max(
+            bucket.get("session_count_old", {}).get("value", 0),
+            bucket.get("session_count_new", {}).get("value", 0)
+        )
+        downloads = (
+            bucket.get("downloads_old", {}).get("doc_count", 0) +
+            bucket.get("downloads_new", {}).get("doc_count", 0)
+        )
         
         variant_key = bucket["key"]
         variant_display_names = {
@@ -969,14 +1076,14 @@ async def get_cowrie_variant_comparison(
             "display_name": variant_display_names.get(variant_key, variant_key.title()),
             "metrics": {
                 "total_events": bucket["doc_count"],
-                "unique_ips": bucket["unique_ips"]["value"],
-                "sessions": bucket["session_count"]["value"],
+                "unique_ips": unique_ips,
+                "sessions": sessions,
                 "login_success": login_success,
                 "login_failed": login_failed,
                 "login_success_rate": round(login_success / total_logins * 100, 1) if total_logins > 0 else 0,
-                "commands_executed": commands_data["doc_count"],
-                "unique_commands": commands_data.get("unique_commands", {}).get("value", 0),
-                "file_downloads": bucket["downloads"]["doc_count"],
+                "commands_executed": commands_count,
+                "unique_commands": unique_commands,
+                "file_downloads": downloads,
             },
             "duration": duration_stats,
             "top_commands": top_commands,
@@ -1422,12 +1529,21 @@ async def get_cowrie_command_categories(
     
     es = get_es_service()
     
-    # Get commands
+    # Get commands - support both old (json.eventid) and new (cowrie.eventid) field structures
     result = await es.search(
         index=INDEX,
         query={"bool": {"must": [
             es._get_time_range_query(time_range),
-            {"exists": {"field": "json.input"}}
+            {"exists": {"field": "json.input"}},
+            {
+                "bool": {
+                    "should": [
+                        {"term": {"json.eventid": "cowrie.command.input"}},
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
         ]}},
         size=0,
         aggs={
@@ -1598,12 +1714,20 @@ async def get_cowrie_command_explorer(
     """
     es = get_es_service()
     
-    # Get all commands with context
+    # Get all commands with context - support both old and new field structures
     result = await es.search(
         index=INDEX,
         query={"bool": {"must": [
             es._get_time_range_query(time_range),
-            {"term": {"json.eventid": "cowrie.command.input"}}
+            {
+                "bool": {
+                    "should": [
+                        {"term": {"json.eventid": "cowrie.command.input"}},
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
         ]}},
         size=0,
         aggs={
@@ -1611,8 +1735,10 @@ async def get_cowrie_command_explorer(
                 "terms": {"field": "json.input", "size": 200},
                 "aggs": {
                     "by_variant": {"terms": {"field": "cowrie_variant", "size": 10}},
-                    "unique_ips": {"cardinality": {"field": "json.src_ip"}},
-                    "sessions": {"cardinality": {"field": "json.session"}},
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
+                    "sessions_old": {"cardinality": {"field": "json.session"}},
+                    "sessions_new": {"cardinality": {"field": "cowrie.session"}},
                     "first_seen": {"min": {"field": "@timestamp"}},
                     "last_seen": {"max": {"field": "@timestamp"}}
                 }
@@ -1662,11 +1788,21 @@ async def get_cowrie_command_explorer(
         for v in bucket.get("by_variant", {}).get("buckets", []):
             variants[v["key"]] = v["doc_count"]
         
+        # Combine old and new field values
+        unique_ips = max(
+            bucket.get("unique_ips_old", {}).get("value", 0),
+            bucket.get("unique_ips_new", {}).get("value", 0)
+        )
+        sessions_count = max(
+            bucket.get("sessions_old", {}).get("value", 0),
+            bucket.get("sessions_new", {}).get("value", 0)
+        )
+        
         commands.append({
             "command": command,
             "count": bucket["doc_count"],
-            "unique_ips": bucket["unique_ips"]["value"],
-            "sessions": bucket["sessions"]["value"],
+            "unique_ips": unique_ips,
+            "sessions": sessions_count,
             "first_seen": bucket["first_seen"]["value_as_string"],
             "last_seen": bucket["last_seen"]["value_as_string"],
             "intent": classification["intent"],

@@ -69,24 +69,17 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     
-    # CORS middleware - allow all origins
+    # CORS middleware - handle wildcard vs specific origins
+    cors_origins = settings.cors_origins_list
+    allow_all = "*" in cors_origins
+    
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,  # Must be False when using wildcard
+        allow_origins=["*"] if allow_all else cors_origins,
+        allow_credentials=not allow_all,  # Can't use credentials with wildcard
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Custom middleware to handle credentials with dynamic origin
-    @app.middleware("http")
-    async def cors_handler(request: Request, call_next):
-        origin = request.headers.get("origin")
-        response = await call_next(request)
-        if origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-        return response
     
     # Security headers middleware
     @app.middleware("http")

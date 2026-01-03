@@ -6,4 +6,3 @@ export { default as ExportToolbar, exportToCSV, exportToPNG } from './ExportTool
 export { default as EvidenceFooter } from './EvidenceFooter';
 export { default as DetailDrawer } from './DetailDrawer';
 
-

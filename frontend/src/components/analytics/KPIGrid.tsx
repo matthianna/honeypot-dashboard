@@ -98,4 +98,3 @@ export default function KPIGrid({ children, columns = 4 }: KPIGridProps) {
   );
 }
 
-

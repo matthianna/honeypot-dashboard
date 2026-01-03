@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useMemo } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -51,7 +51,8 @@ const HONEYPOT_ICONS: Record<string, typeof Terminal> = {
 export default function Dashboard() {
   const { timeRange, setTimeRange } = useTimeRange('24h');
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [animatedTotal, setAnimatedTotal] = useState(0);
+  const [animatedTotal, setAnimatedTotal] = useState<number | null>(null);
+  const previousTotalRef = useRef<number>(0);
 
   // Update clock
   useEffect(() => {
@@ -101,14 +102,28 @@ export default function Dashboard() {
     30000
   );
 
-  // Animate total events counter
+  // Animate total events counter - only animate the difference
   useEffect(() => {
-    if (overview?.total_events) {
+    if (overview?.total_events !== undefined) {
       const target = overview.total_events;
-      const duration = 1500;
-      const steps = 60;
-      const increment = target / steps;
-      let current = 0;
+      const start = previousTotalRef.current;
+      
+      // If this is the first load (no previous value), just set it directly
+      if (animatedTotal === null) {
+        setAnimatedTotal(target);
+        previousTotalRef.current = target;
+        return;
+      }
+      
+      // If the value hasn't changed, do nothing
+      if (start === target) return;
+      
+      // Animate from current value to new value
+      const difference = target - start;
+      const duration = Math.min(1000, Math.abs(difference) * 5); // Faster animation for small changes
+      const steps = 30;
+      const increment = difference / steps;
+      let current = start;
       let step = 0;
 
       const timer = setInterval(() => {
@@ -118,6 +133,7 @@ export default function Dashboard() {
         if (step >= steps) {
           clearInterval(timer);
           setAnimatedTotal(target);
+          previousTotalRef.current = target;
         }
       }, duration / steps);
 
@@ -194,7 +210,7 @@ export default function Dashboard() {
               <div className="text-xs text-text-muted uppercase tracking-wider mb-1">Total Events Captured</div>
               <div className="flex items-baseline justify-center lg:justify-end gap-3">
                 <span className="text-5xl lg:text-6xl font-display font-black text-transparent bg-clip-text bg-gradient-to-r from-neon-green via-neon-blue to-neon-green">
-                  {animatedTotal.toLocaleString()}
+                  {(animatedTotal ?? overview?.total_events ?? 0).toLocaleString()}
                 </span>
                 {trend.direction !== 'stable' && (
                   <div className={`flex items-center gap-1 ${trend.direction === 'up' ? 'text-red-400' : 'text-green-400'}`}>

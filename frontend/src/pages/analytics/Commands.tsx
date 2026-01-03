@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Command, GitBranch, Play, Clock } from 'lucide-react';
+import { Command, GitBranch, Play, Clock, Info, Filter } from 'lucide-react';
 import {
   BarChart,
   Bar,
@@ -23,29 +23,36 @@ const VARIANT_COLORS: Record<string, string> = {
 };
 
 export default function Commands() {
-  const { timeRange, setLastUpdated } = useAnalytics();
+  const { timeRange, filters, setLastUpdated } = useAnalytics();
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [sessionTimeline, setSessionTimeline] = useState<any>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
 
+  // Convert context filters to API filter format
+  const apiFilters = {
+    variant: filters.aiVariant,
+    srcIp: filters.srcIp,
+    country: filters.country,
+  };
+
   const { data: topCommands, loading: commandsLoading } = useApiWithRefresh(
-    useCallback(() => api.getAnalyticsCowrieCommandsTop(timeRange, 30),
-    [timeRange]),
-    [timeRange],
+    useCallback(() => api.getAnalyticsCowrieCommandsTop(timeRange, 30, apiFilters),
+    [timeRange, filters.aiVariant, filters.srcIp, filters.country]),
+    [timeRange, filters.aiVariant, filters.srcIp, filters.country],
     60000
   );
 
   const { data: sequences, loading: seqLoading } = useApiWithRefresh(
-    useCallback(() => api.getAnalyticsCowrieSequences(timeRange),
-    [timeRange]),
-    [timeRange],
+    useCallback(() => api.getAnalyticsCowrieSequences(timeRange, { variant: filters.aiVariant, srcIp: filters.srcIp }),
+    [timeRange, filters.aiVariant, filters.srcIp]),
+    [timeRange, filters.aiVariant, filters.srcIp],
     60000
   );
 
   const { data: sessionsList, loading: sessionsLoading } = useApiWithRefresh(
-    useCallback(() => api.getAnalyticsCaseStudyList(timeRange, 3, 20),
-    [timeRange]),
-    [timeRange],
+    useCallback(() => api.getAnalyticsCaseStudyList(timeRange, 3, 20, { variant: filters.aiVariant, srcIp: filters.srcIp }),
+    [timeRange, filters.aiVariant, filters.srcIp]),
+    [timeRange, filters.aiVariant, filters.srcIp],
     60000
   );
 
@@ -122,11 +129,48 @@ export default function Commands() {
     { key: 'commands', header: 'Commands', render: (item: any) => (
       <span className="text-neon-orange font-medium">{item.commands}</span>
     )},
-    { key: 'duration', header: 'Duration', render: (item: any) => `${item.duration.toFixed(1)}s` },
+    { key: 'duration', header: 'Duration', render: (item: any) => `${typeof item.duration === 'number' ? item.duration.toFixed(1) : '0'}s` },
   ];
+
+  // Check if any filters are active
+  const activeFilters = [
+    filters.aiVariant && `Variant: ${filters.aiVariant}`,
+    filters.srcIp && `IP: ${filters.srcIp}`,
+    filters.country && `Country: ${filters.country}`,
+  ].filter(Boolean);
+
+  // Show warning if non-cowrie honeypot is selected
+  const isNonCowrieSelected = filters.honeypot && filters.honeypot !== 'cowrie';
 
   return (
     <div className="space-y-6">
+      {/* Honeypot mismatch warning */}
+      {isNonCowrieSelected && (
+        <div className="bg-neon-orange/10 border border-neon-orange/30 rounded-lg p-3 flex items-center gap-3">
+          <Info className="w-5 h-5 text-neon-orange flex-shrink-0" />
+          <p className="text-sm text-text-secondary">
+            This page shows <strong className="text-neon-green">Cowrie SSH</strong> commands. 
+            The "{filters.honeypot}" honeypot filter doesn't apply here. 
+            Only variant, IP, and country filters are used.
+          </p>
+        </div>
+      )}
+
+      {/* Active filters indicator */}
+      {activeFilters.length > 0 && (
+        <div className="bg-neon-blue/10 border border-neon-blue/30 rounded-lg p-3 flex items-center gap-3">
+          <Filter className="w-5 h-5 text-neon-blue flex-shrink-0" />
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm text-text-secondary">Active filters:</span>
+            {activeFilters.map((filter, i) => (
+              <span key={i} className="px-2 py-0.5 bg-neon-blue/20 text-neon-blue text-xs rounded">
+                {filter}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* KPIs */}
       <KPIGrid columns={4}>
         <KPICard

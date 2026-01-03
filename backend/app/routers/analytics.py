@@ -958,23 +958,55 @@ async def get_cowrie_distributions(
 async def get_top_commands(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     variant: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    country: Optional[str] = None,
     limit: int = Query(default=30, ge=1, le=100),
     _: str = Depends(get_current_user)
 ):
-    """Get top commands executed."""
+    """Get top commands executed with optional filtering by variant, source IP, or country."""
     es = get_es_service()
     
+    # Support both old (json.eventid) and new (cowrie.eventid) field structures
     query = {
         "bool": {
             "must": [
                 es._get_time_range_query(time_range),
-                {"term": {"json.eventid": "cowrie.command.input"}}
+                {
+                    "bool": {
+                        "should": [
+                            {"term": {"json.eventid": "cowrie.command.input"}},
+                            {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                        ],
+                        "minimum_should_match": 1
+                    }
+                }
             ]
         }
     }
     
     if variant:
         query["bool"]["must"].append({"term": {"cowrie_variant": variant}})
+    if src_ip:
+        # Support both old and new field structures
+        query["bool"]["must"].append({
+            "bool": {
+                "should": [
+                    {"term": {"json.src_ip": src_ip}},
+                    {"term": {"cowrie.src_ip": src_ip}}
+                ],
+                "minimum_should_match": 1
+            }
+        })
+    if country:
+        query["bool"]["must"].append({
+            "bool": {
+                "should": [
+                    {"match": {"source.geo.country_name": country}},
+                    {"match": {"cowrie.geo.country_name": country}}
+                ],
+                "minimum_should_match": 1
+            }
+        })
     
     result = await es.search(
         index=INDICES["cowrie"],
@@ -985,7 +1017,9 @@ async def get_top_commands(
                 "terms": {"field": "json.input", "size": limit},
                 "aggs": {
                     "by_variant": {"terms": {"field": "cowrie_variant", "size": 5}},
-                    "unique_ips": {"cardinality": {"field": "json.src_ip"}},
+                    # Support both field structures for unique IPs
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
                 }
             }
         }
@@ -994,10 +1028,13 @@ async def get_top_commands(
     commands = []
     for bucket in result.get("aggregations", {}).get("commands", {}).get("buckets", []):
         by_variant = {b["key"]: b["doc_count"] for b in bucket.get("by_variant", {}).get("buckets", [])}
+        # Combine unique IPs from both old and new field structures
+        unique_ips_old = bucket.get("unique_ips_old", {}).get("value", 0)
+        unique_ips_new = bucket.get("unique_ips_new", {}).get("value", 0)
         commands.append({
             "command": bucket["key"],
             "count": bucket["doc_count"],
-            "unique_ips": bucket.get("unique_ips", {}).get("value", 0),
+            "unique_ips": max(unique_ips_old, unique_ips_new),  # Use max since they're the same data
             "by_variant": by_variant,
         })
     
@@ -1010,26 +1047,60 @@ async def get_top_commands(
 @router.get("/cowrie/sequences")
 async def get_command_sequences(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    variant: Optional[str] = None,
+    src_ip: Optional[str] = None,
     _: str = Depends(get_current_user)
 ):
-    """Get command sequence patterns (bigrams)."""
+    """Get command sequence patterns (bigrams) with optional filtering."""
     es = get_es_service()
     
-    # Get commands grouped by session
+    # Support both old and new field structures
+    must_clauses = [
+        es._get_time_range_query(time_range),
+        {
+            "bool": {
+                "should": [
+                    {"term": {"json.eventid": "cowrie.command.input"}},
+                    {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    ]
+    
+    if variant:
+        must_clauses.append({"term": {"cowrie_variant": variant}})
+    if src_ip:
+        must_clauses.append({
+            "bool": {
+                "should": [
+                    {"term": {"json.src_ip": src_ip}},
+                    {"term": {"cowrie.src_ip": src_ip}}
+                ],
+                "minimum_should_match": 1
+            }
+        })
+    
+    # Get commands grouped by session - try both old and new session fields
     result = await es.search(
         index=INDICES["cowrie"],
-        query={
-            "bool": {
-                "must": [
-                    es._get_time_range_query(time_range),
-                    {"term": {"json.eventid": "cowrie.command.input"}}
-                ]
-            }
-        },
+        query={"bool": {"must": must_clauses}},
         size=0,
         aggs={
-            "sessions": {
+            "sessions_old": {
                 "terms": {"field": "json.session", "size": 500},
+                "aggs": {
+                    "commands": {
+                        "top_hits": {
+                            "size": 20,
+                            "sort": [{"@timestamp": "asc"}],
+                            "_source": ["json.input"]
+                        }
+                    }
+                }
+            },
+            "sessions_new": {
+                "terms": {"field": "cowrie.session", "size": 500},
                 "aggs": {
                     "commands": {
                         "top_hits": {
@@ -1046,7 +1117,13 @@ async def get_command_sequences(
     bigrams = {}
     trigrams = {}
     
-    for session_bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+    # Process both old and new format sessions
+    all_session_buckets = (
+        result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []) +
+        result.get("aggregations", {}).get("sessions_new", {}).get("buckets", [])
+    )
+    
+    for session_bucket in all_session_buckets:
         commands = [
             hit["_source"]["json"]["input"]
             for hit in session_bucket.get("commands", {}).get("hits", {}).get("hits", [])
@@ -1570,28 +1647,59 @@ async def list_interesting_sessions(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     min_commands: int = Query(default=3, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
+    variant: Optional[str] = None,
+    src_ip: Optional[str] = None,
     _: str = Depends(get_current_user)
 ):
-    """List interesting sessions for case study selection."""
+    """List interesting sessions for case study selection with optional filtering."""
     es = get_es_service()
+    
+    # Support both old and new field structures
+    must_clauses = [
+        es._get_time_range_query(time_range),
+        {
+            "bool": {
+                "should": [
+                    {"term": {"json.eventid": "cowrie.command.input"}},
+                    {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    ]
+    
+    if variant:
+        must_clauses.append({"term": {"cowrie_variant": variant}})
+    if src_ip:
+        must_clauses.append({
+            "bool": {
+                "should": [
+                    {"term": {"json.src_ip": src_ip}},
+                    {"term": {"cowrie.src_ip": src_ip}}
+                ],
+                "minimum_should_match": 1
+            }
+        })
     
     result = await es.search(
         index=INDICES["cowrie"],
-        query={
-            "bool": {
-                "must": [
-                    es._get_time_range_query(time_range),
-                    {"term": {"json.eventid": "cowrie.command.input"}}
-                ]
-            }
-        },
+        query={"bool": {"must": must_clauses}},
         size=0,
         aggs={
-            "sessions": {
+            "sessions_old": {
                 "terms": {"field": "json.session", "size": 500},
                 "aggs": {
                     "variant": {"terms": {"field": "cowrie_variant", "size": 1}},
                     "src_ip": {"terms": {"field": "json.src_ip", "size": 1}},
+                    "first": {"min": {"field": "@timestamp"}},
+                    "last": {"max": {"field": "@timestamp"}},
+                }
+            },
+            "sessions_new": {
+                "terms": {"field": "cowrie.session", "size": 500},
+                "aggs": {
+                    "variant": {"terms": {"field": "cowrie_variant", "size": 1}},
+                    "src_ip": {"terms": {"field": "cowrie.src_ip", "size": 1}},
                     "first": {"min": {"field": "@timestamp"}},
                     "last": {"max": {"field": "@timestamp"}},
                 }
@@ -1600,7 +1708,13 @@ async def list_interesting_sessions(
     )
     
     sessions = []
-    for bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+    # Process both old and new format sessions
+    all_session_buckets = (
+        result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []) +
+        result.get("aggregations", {}).get("sessions_new", {}).get("buckets", [])
+    )
+    
+    for bucket in all_session_buckets:
         cmd_count = bucket["doc_count"]
         if cmd_count < min_commands:
             continue

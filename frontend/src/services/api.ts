@@ -31,25 +31,15 @@ import type {
 } from '../types';
 
 // Dynamically determine API URL based on current location
-// nginx on port 3000 proxies /api/* and /auth/* to backend
-// Vite dev server on port 5173 needs direct backend access
+// Always use the same hostname as the page with port 8000
+// This ensures external access works without hardcoding IPs
 const getApiUrl = (): string => {
-  const envUrl = import.meta.env.VITE_API_URL;
+  const hostname = window.location.hostname;
+  const protocol = window.location.protocol;
   
-  // If env URL is explicitly set, use it
-  if (envUrl) {
-    return envUrl;
-  }
-  
-  // Check if running on Vite dev server (port 5173)
-  // In dev mode, we need to call backend directly
-  if (window.location.port === '5173') {
-    return 'http://localhost:8000';
-  }
-  
-  // For all other cases (nginx on port 3000, external access, etc.)
-  // use relative URLs - nginx will proxy to backend
-  return '';
+  // Always use the same hostname with port 8000
+  // This works for both localhost development and external access
+  return `${protocol}//${hostname}:8000`;
 };
 
 const API_URL = getApiUrl();
@@ -61,7 +51,6 @@ class ApiService {
   constructor() {
     this.client = axios.create({
       baseURL: API_URL,
-      timeout: 60000, // 60 second timeout
       headers: {
         'Content-Type': 'application/json',
       },
@@ -85,34 +74,17 @@ class ApiService {
       async (error: AxiosError) => {
         const originalRequest = error.config;
         
-        // Skip refresh for auth endpoints to prevent infinite loops
-        const isAuthEndpoint = originalRequest?.url?.includes('/auth/');
-        
-        // Don't attempt refresh if already retried or if it's an auth endpoint
-        if (
-          error.response?.status === 401 && 
-          originalRequest && 
-          !originalRequest.headers['X-Retry'] &&
-          !isAuthEndpoint
-        ) {
-          // Check if we have a refresh token before attempting
-          const refreshToken = localStorage.getItem('refresh_token');
-          if (!refreshToken) {
-            // No refresh token, just clear and reject
-            localStorage.removeItem('access_token');
-            return Promise.reject(error);
-          }
-          
+        if (error.response?.status === 401 && originalRequest && !originalRequest.headers['X-Retry']) {
           try {
             const newToken = await this.refreshToken();
             originalRequest.headers.Authorization = `Bearer ${newToken}`;
             originalRequest.headers['X-Retry'] = 'true';
             return this.client(originalRequest);
           } catch {
-            // Refresh failed, just clear tokens - let React Router handle redirect
+            // Refresh failed, redirect to login
             localStorage.removeItem('access_token');
             localStorage.removeItem('refresh_token');
-            return Promise.reject(error);
+            window.location.href = '/login';
           }
         }
         
@@ -1317,12 +1289,6 @@ class ApiService {
 
   // WebSocket connection for attack map
   createAttackMapWebSocket(): WebSocket {
-    // Handle relative URL case (empty API_URL means nginx proxies)
-    if (!API_URL || API_URL === '') {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/attackmap/ws`;
-      return new WebSocket(wsUrl);
-    }
     const wsUrl = API_URL.replace('http', 'ws') + '/api/attackmap/ws';
     return new WebSocket(wsUrl);
   }
@@ -1555,16 +1521,33 @@ class ApiService {
   }
 
   // Cowrie Commands
-  async getAnalyticsCowrieCommandsTop(timeRange: TimeRange = '24h', limit = 30): Promise<any> {
+  async getAnalyticsCowrieCommandsTop(
+    timeRange: TimeRange = '24h', 
+    limit = 30,
+    filters?: { variant?: string; srcIp?: string; country?: string }
+  ): Promise<any> {
     const response = await this.client.get('/api/analytics/cowrie/commands/top', {
-      params: { time_range: timeRange, limit }
+      params: { 
+        time_range: timeRange, 
+        limit,
+        ...(filters?.variant && { variant: filters.variant }),
+        ...(filters?.srcIp && { src_ip: filters.srcIp }),
+        ...(filters?.country && { country: filters.country }),
+      }
     });
     return response.data;
   }
 
-  async getAnalyticsCowrieSequences(timeRange: TimeRange = '24h'): Promise<any> {
+  async getAnalyticsCowrieSequences(
+    timeRange: TimeRange = '24h',
+    filters?: { variant?: string; srcIp?: string }
+  ): Promise<any> {
     const response = await this.client.get('/api/analytics/cowrie/sequences', {
-      params: { time_range: timeRange }
+      params: { 
+        time_range: timeRange,
+        ...(filters?.variant && { variant: filters.variant }),
+        ...(filters?.srcIp && { src_ip: filters.srcIp }),
+      }
     });
     return response.data;
   }
@@ -1575,9 +1558,20 @@ class ApiService {
   }
 
   // Case Study
-  async getAnalyticsCaseStudyList(timeRange: TimeRange = '24h', minCommands = 3, limit = 30): Promise<any> {
+  async getAnalyticsCaseStudyList(
+    timeRange: TimeRange = '24h', 
+    minCommands = 3, 
+    limit = 30,
+    filters?: { variant?: string; srcIp?: string }
+  ): Promise<any> {
     const response = await this.client.get('/api/analytics/case-study/list', {
-      params: { time_range: timeRange, min_commands: minCommands, limit }
+      params: { 
+        time_range: timeRange, 
+        min_commands: minCommands, 
+        limit,
+        ...(filters?.variant && { variant: filters.variant }),
+        ...(filters?.srcIp && { src_ip: filters.srcIp }),
+      }
     });
     return response.data;
   }

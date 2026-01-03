@@ -115,7 +115,7 @@ export default function CaseStudy() {
     { key: 'commands', header: 'Commands', render: (item: any) => (
       <span className="text-neon-green font-medium">{item.commands}</span>
     )},
-    { key: 'duration', header: 'Duration', render: (item: any) => `${item.duration.toFixed(1)}s` },
+    { key: 'duration', header: 'Duration', render: (item: any) => `${typeof item.duration === 'number' ? item.duration.toFixed(1) : '0'}s` },
   ];
 
   const filteredSessions = sessionsList?.sessions?.filter((s: any) => 
@@ -263,7 +263,7 @@ export default function CaseStudy() {
                   </div>
                   <div className="bg-bg-secondary p-3 rounded-lg print:bg-gray-100">
                     <div className="text-xs text-text-muted print:text-gray-600">Duration</div>
-                    <div className="font-mono text-sm">{caseStudy.info?.duration?.toFixed(1) || 0}s</div>
+                    <div className="font-mono text-sm">{typeof caseStudy.info?.duration === 'number' ? caseStudy.info.duration.toFixed(1) : '0'}s</div>
                   </div>
                   <div className="bg-bg-secondary p-3 rounded-lg print:bg-gray-100">
                     <div className="text-xs text-text-muted print:text-gray-600">Total Events</div>

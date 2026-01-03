@@ -15,6 +15,7 @@ import {
   Bot,
   Zap,
   Shield,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -504,6 +505,21 @@ export default function Cowrie() {
       icon: <GitCompare className="w-4 h-4" />,
       content: (
         <div className="space-y-6">
+          {/* Data Quality Warning */}
+          {!variantsLoading && variants.length > 0 && variants.every(v => v.unique_ips === 0 && v.sessions_count === 0) && (
+            <div className="bg-neon-orange/10 border border-neon-orange/30 rounded-lg p-4 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-neon-orange flex-shrink-0 mt-0.5" />
+              <div>
+                <h4 className="font-medium text-neon-orange mb-1">Limited Data Available</h4>
+                <p className="text-sm text-text-secondary">
+                  No detailed metrics available for the selected time range. The honeypot logs may be missing required fields 
+                  (eventid, src_ip, session). Try selecting <strong>7D or 30D</strong> to see historical data with full metrics, 
+                  or check the cowrie log configuration on your honeypot server.
+                </p>
+              </div>
+            </div>
+          )}
+          
           {/* Variant Cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {variantsLoading ? (

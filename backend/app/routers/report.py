@@ -679,4 +679,3 @@ async def get_geographic_analysis(
     }
 
 
-
