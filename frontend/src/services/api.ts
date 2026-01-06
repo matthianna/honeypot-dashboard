@@ -136,9 +136,26 @@ class ApiService {
   }
 
   // Dashboard endpoints
-  async getDashboardOverview(timeRange: TimeRange = '24h'): Promise<DashboardOverview> {
+  async getDashboardOverview(timeRange: TimeRange = '24h', excludeFirewall: boolean = true): Promise<DashboardOverview> {
     const response = await this.client.get<DashboardOverview>('/api/dashboard/overview', {
-      params: { time_range: timeRange },
+      params: { time_range: timeRange, exclude_firewall: excludeFirewall },
+    });
+    return response.data;
+  }
+
+  async getUnifiedStats(timeRange: TimeRange = '24h', excludeFirewall: boolean = true): Promise<{
+    time_range: string;
+    summary: {
+      total_unique_ips: number;
+      total_unique_countries: number;
+      total_events: number;
+    };
+    honeypots: Record<string, { events: number; unique_ips: number }>;
+    countries: Array<{ country: string; unique_ips: number; total_events: number }>;
+    all_countries_count: number;
+  }> {
+    const response = await this.client.get('/api/dashboard/unified-stats', {
+      params: { time_range: timeRange, exclude_firewall: excludeFirewall },
     });
     return response.data;
   }
@@ -150,9 +167,9 @@ class ApiService {
     return response.data;
   }
 
-  async getDashboardTimeline(timeRange: TimeRange = '24h'): Promise<TimelineResponse> {
+  async getDashboardTimeline(timeRange: TimeRange = '24h', excludeFirewall: boolean = true): Promise<TimelineResponse> {
     const response = await this.client.get<TimelineResponse>('/api/dashboard/timeline', {
-      params: { time_range: timeRange },
+      params: { time_range: timeRange, exclude_firewall: excludeFirewall },
     });
     return response.data;
   }
@@ -168,9 +185,9 @@ class ApiService {
     return response.data;
   }
 
-  async getGeoStats(timeRange: TimeRange = '24h'): Promise<GeoDistributionResponse> {
+  async getGeoStats(timeRange: TimeRange = '24h', excludeFirewall: boolean = true): Promise<GeoDistributionResponse> {
     const response = await this.client.get<GeoDistributionResponse>('/api/dashboard/geo-stats', {
-      params: { time_range: timeRange },
+      params: { time_range: timeRange, exclude_firewall: excludeFirewall },
     });
     return response.data;
   }
@@ -200,8 +217,41 @@ class ApiService {
     return response.data;
   }
 
-  async getAttackVelocity(): Promise<{ velocity: Array<{ timestamp: string; count: number }>; stats: { avg_per_minute: number; max_per_minute: number; current_per_minute: number } }> {
+  async getAttackVelocity(): Promise<{ 
+    velocity: Array<{ timestamp: string; count: number }>; 
+    stats: { avg_per_minute: number; max_per_minute: number; current_per_minute: number };
+    current_rate?: number;
+    trend?: 'increasing' | 'decreasing' | 'stable';
+  }> {
     const response = await this.client.get('/api/dashboard/attack-velocity');
+    return response.data;
+  }
+
+  async getRecentActivity(limit = 10): Promise<{
+    events: Array<{
+      timestamp: string;
+      honeypot: string;
+      event_type: string;
+      src_ip?: string;
+      details?: string;
+    }>;
+  }> {
+    const response = await this.client.get('/api/dashboard/recent-activity', {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  async getDashboardCredentials(timeRange: TimeRange = '24h'): Promise<{
+    total_attempts: number;
+    unique_usernames: number;
+    unique_passwords: number;
+    top_usernames: Array<{ username: string; count: number }>;
+    top_passwords: Array<{ password: string; count: number }>;
+  }> {
+    const response = await this.client.get('/api/dashboard/credentials', {
+      params: { time_range: timeRange },
+    });
     return response.data;
   }
 
@@ -299,15 +349,70 @@ class ApiService {
   }
 
   // Attack Map endpoints
-  async getRecentAttacks(limit = 50, honeypot?: string): Promise<AttackEvent[]> {
+  async getRecentAttacks(limit = 50, seconds = 10, honeypot?: string): Promise<AttackEvent[]> {
     const response = await this.client.get<AttackEvent[]>('/api/attackmap/recent', {
-      params: { limit, honeypot },
+      params: { limit, seconds, honeypot },
+    });
+    return response.data;
+  }
+
+  async getHistoricalAttacks(limit = 100): Promise<AttackEvent[]> {
+    const response = await this.client.get<AttackEvent[]>('/api/attackmap/historical', {
+      params: { limit },
     });
     return response.data;
   }
 
   async getAttackMapStats(): Promise<AttackMapStats> {
     const response = await this.client.get<AttackMapStats>('/api/attackmap/stats');
+    return response.data;
+  }
+
+  async getAttackMapRecent(limit = 50, seconds = 10): Promise<AttackEvent[]> {
+    const response = await this.client.get<AttackEvent[]>('/api/attackmap/recent', {
+      params: { limit, seconds },
+    });
+    return response.data;
+  }
+
+  async getAttackMapTopCountries(limit = 10): Promise<{ countries: Array<{ country: string; count: number }> }> {
+    const response = await this.client.get('/api/attackmap/top-countries', {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  // Firewall Map endpoints
+  async getFirewallMapRecent(limit = 50, seconds = 30): Promise<any[]> {
+    const response = await this.client.get('/api/firewallmap/recent', {
+      params: { limit, seconds },
+    });
+    return response.data;
+  }
+
+  async getFirewallMapHistorical(limit = 100): Promise<any[]> {
+    const response = await this.client.get('/api/firewallmap/historical', {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  async getFirewallMapStats(): Promise<any> {
+    const response = await this.client.get('/api/firewallmap/stats');
+    return response.data;
+  }
+
+  async getFirewallMapTopPorts(limit = 10): Promise<any> {
+    const response = await this.client.get('/api/firewallmap/top-ports', {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  async getFirewallMapTopCountries(limit = 10): Promise<any> {
+    const response = await this.client.get('/api/firewallmap/top-countries', {
+      params: { limit },
+    });
     return response.data;
   }
 
@@ -605,6 +710,18 @@ class ApiService {
   getDionaeaTopAttackers = (timeRange: TimeRange, limit?: number) => this.getHoneypotTopAttackers('dionaea', timeRange, limit);
   getDionaeaHeatmap = (timeRange: TimeRange) => this.getHoneypotHeatmap('dionaea', timeRange);
 
+  async getDionaeaPortTimeline(timeRange: TimeRange): Promise<{
+    time_range: string;
+    interval: string;
+    timeline: Array<{ timestamp: string; total: number; [key: string]: any }>;
+    ports: Array<{ port: number; label: string }>;
+  }> {
+    const response = await this.client.get('/api/dionaea/port-timeline', {
+      params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
   async getDionaeaProtocols(timeRange: TimeRange, limit = 20): Promise<DionaeaProtocolStats[]> {
     const response = await this.client.get<DionaeaProtocolStats[]>('/api/dionaea/protocols', {
       params: { time_range: timeRange, limit },
@@ -863,6 +980,77 @@ class ApiService {
     return response.data;
   }
 
+  // Galah Attacker View endpoints
+  async getGalahAttackers(timeRange: TimeRange, limit = 100): Promise<{
+    attackers: Array<{
+      ip: string;
+      total_requests: number;
+      sessions: number;
+      unique_paths: number;
+      first_seen: string;
+      last_seen: string;
+      methods: string[];
+      country: string | null;
+      city: string | null;
+    }>;
+    total: number;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/galah/attackers', {
+      params: { time_range: timeRange, limit },
+    });
+    return response.data;
+  }
+
+  async getGalahAttackerSessions(ip: string, timeRange: TimeRange = '30d'): Promise<{
+    ip: string;
+    sessions: Array<{
+      session_id: string;
+      request_count: number;
+      first_request: string;
+      last_request: string;
+      duration_seconds: number | null;
+      paths: string[];
+      methods: string[];
+      user_agent: string | null;
+    }>;
+    total_sessions: number;
+    time_range: string;
+  }> {
+    const response = await this.client.get(`/api/galah/attacker/${encodeURIComponent(ip)}/sessions`, {
+      params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
+  async getGalahSessionReplay(sessionId: string): Promise<{
+    session_id: string;
+    info: {
+      source_ip: string | null;
+      country: string | null;
+      city: string | null;
+      user_agent: string | null;
+    };
+    events: Array<{
+      sequence: number;
+      timestamp: string;
+      method: string | null;
+      path: string | null;
+      query: string | null;
+      request_body: string | null;
+      response_status: number | null;
+      response_body: string | null;
+      response_mime: string | null;
+      ai_generated: boolean;
+      ai_model: string | null;
+    }>;
+    total_events: number;
+    duration_seconds: number | null;
+  }> {
+    const response = await this.client.get(`/api/galah/session/${encodeURIComponent(sessionId)}/replay`);
+    return response.data;
+  }
+
   // RDPY endpoints
   getRDPYStats = (timeRange: TimeRange) => this.getHoneypotStats('rdpy', timeRange);
   getRDPYTimeline = (timeRange: TimeRange) => this.getHoneypotTimeline('rdpy', timeRange);
@@ -963,6 +1151,17 @@ class ApiService {
   getHeraldingTopAttackers = (timeRange: TimeRange, limit?: number) => this.getHoneypotTopAttackers('heralding', timeRange, limit);
   getHeraldingHeatmap = (timeRange: TimeRange) => this.getHoneypotHeatmap('heralding', timeRange);
 
+  async getHeraldingTimelineByPort(timeRange: TimeRange): Promise<{
+    data: Array<Record<string, number | string>>;
+    ports: Array<{ port: number; name: string; count: number }>;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/heralding/timeline-by-port', {
+      params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
   async getHeraldingCredentials(timeRange: TimeRange, limit = 50, protocol?: string): Promise<HeraldingCredential[]> {
     const response = await this.client.get<HeraldingCredential[]>('/api/heralding/credentials', {
       params: { time_range: timeRange, limit, protocol },
@@ -1049,6 +1248,18 @@ class ApiService {
   }> {
     const response = await this.client.get('/api/heralding/credential-reuse', {
       params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
+  async getHeraldingTopCredentials(timeRange: TimeRange, limit = 10): Promise<{
+    top_usernames: Array<{ username: string; count: number }>;
+    top_passwords: Array<{ password: string; count: number }>;
+    total_unique_usernames: number;
+    total_unique_passwords: number;
+  }> {
+    const response = await this.client.get('/api/heralding/top-credentials', {
+      params: { time_range: timeRange, limit },
     });
     return response.data;
   }
@@ -1293,124 +1504,6 @@ class ApiService {
     return new WebSocket(wsUrl);
   }
 
-  // ==================== Thesis Report API ====================
-
-  async getThesisSummary(timeRange: TimeRange = '30d'): Promise<{
-    study_period: { time_range: string; start: string; end: string };
-    totals: { total_events: number; unique_ips: number; countries: number };
-    by_honeypot: Record<string, { events: number; unique_ips: number; countries: number }>;
-    honeypot_percentages: Record<string, number>;
-  }> {
-    const response = await this.client.get('/api/report/thesis-summary', {
-      params: { time_range: timeRange }
-    });
-    return response.data;
-  }
-
-  async getLLMComparison(timeRange: TimeRange = '30d'): Promise<{
-    time_range: string;
-    variants: Array<{
-      variant: string;
-      display_name: string;
-      metrics: {
-        total_events: number;
-        unique_ips: number;
-        sessions: number;
-        login_attempts: number;
-        login_success: number;
-        login_failed: number;
-        commands_executed: number;
-        unique_commands: number;
-        file_downloads: number;
-      };
-      engagement: {
-        login_rate: number;
-        success_rate: number;
-        command_rate: number;
-        commands_per_session: number;
-      };
-      duration: {
-        avg: number;
-        max: number;
-        min: number;
-        median: number;
-        count: number;
-      };
-      top_commands: Array<{ command: string; count: number }>;
-    }>;
-    effectiveness_comparison: Record<string, { vs_plain: { session_duration_ratio: number; command_ratio: number; engagement_ratio: number } }>;
-  }> {
-    const response = await this.client.get('/api/report/llm-comparison', {
-      params: { time_range: timeRange }
-    });
-    return response.data;
-  }
-
-  async getPatternAnalysis(timeRange: TimeRange = '30d'): Promise<{
-    time_range: string;
-    command_categories: Record<string, { count: number; total_executions: number; top_5: Array<{ command: string; count: number }> }>;
-    mitre_techniques: Array<{ technique_id: string; name: string; count: number; commands: string[] }>;
-    credentials: {
-      top_usernames: Array<{ username: string; count: number }>;
-      top_passwords: Array<{ password: string; count: number }>;
-    };
-    protocols: Array<{ protocol: string; count: number }>;
-  }> {
-    const response = await this.client.get('/api/report/pattern-analysis', {
-      params: { time_range: timeRange }
-    });
-    return response.data;
-  }
-
-  async getTrendAnalysis(): Promise<{
-    weekly_trends: Array<{
-      week: string;
-      start: string;
-      end: string;
-      total_events: number;
-      unique_ips: number;
-      by_honeypot: Record<string, number>;
-    }>;
-    hourly_pattern: Array<{ hour: number; count: number }>;
-    daily_pattern: Array<{ day: string; day_index: number; count: number }>;
-    peak_hour: number;
-    peak_day: string;
-  }> {
-    const response = await this.client.get('/api/report/trend-analysis');
-    return response.data;
-  }
-
-  async getGeographicAnalysis(timeRange: TimeRange = '30d'): Promise<{
-    time_range: string;
-    top_countries: Array<{
-      country: string;
-      total: number;
-      by_honeypot: Record<string, number>;
-    }>;
-    by_honeypot: Record<string, Array<{ country: string; count: number }>>;
-    total_countries: number;
-  }> {
-    const response = await this.client.get('/api/report/geographic-analysis', {
-      params: { time_range: timeRange }
-    });
-    return response.data;
-  }
-
-  async getKeyFindings(timeRange: TimeRange = '30d'): Promise<{
-    time_range: string;
-    findings: Array<{
-      category: string;
-      finding: string;
-      significance: 'high' | 'medium' | 'low';
-    }>;
-    generated_at: string;
-  }> {
-    const response = await this.client.get('/api/report/key-findings', {
-      params: { time_range: timeRange }
-    });
-    return response.data;
-  }
-
   // ==================== Analytics Dashboard API ====================
 
   // Overview
@@ -1506,15 +1599,172 @@ class ApiService {
   }
 
   // Cowrie Sessions
-  async getAnalyticsCowrieSessions(timeRange: TimeRange = '24h', limit = 50, variant?: string): Promise<any> {
-    const response = await this.client.get('/api/analytics/cowrie/sessions', {
-      params: { time_range: timeRange, limit, ...(variant && { variant }) }
-    });
+  async getAnalyticsCowrieSessions(timeRange: TimeRange = '24h', limit = 100, variant?: string, showEmpty?: boolean | null): Promise<any> {
+    // showEmpty: null = all, true = empty only (has_commands=false), false = with commands (has_commands=true)
+    const params: any = { time_range: timeRange, limit };
+    if (variant) params.variant = variant;
+    if (showEmpty === true) params.has_commands = false;
+    if (showEmpty === false) params.has_commands = true;
+    
+    const response = await this.client.get('/api/analytics/cowrie/sessions', { params });
     return response.data;
   }
 
   async getAnalyticsCowrieDistributions(timeRange: TimeRange = '24h'): Promise<any> {
     const response = await this.client.get('/api/analytics/cowrie/distributions', {
+      params: { time_range: timeRange }
+    });
+    return response.data;
+  }
+
+  async getAnalyticsCowrieVariantStudy(timeRange: TimeRange = '7d'): Promise<{
+    variants: Record<string, {
+      total_sessions_with_commands: number;
+      total_commands: number;
+      avg_commands_per_session: number;
+      avg_session_duration: number;
+      max_commands_in_session: number;
+      unique_attackers: number;
+      successful_logins: number;
+      failed_logins: number;
+      login_success_rate: number;
+      file_downloads: number;
+      sessions_with_downloads: number;
+      top_sessions: Array<{
+        session_id: string;
+        commands: number;
+        duration: number;
+        src_ip: string;
+        country: string;
+        login_success: boolean;
+        has_download: boolean;
+      }>;
+    }>;
+    comparison: {
+      engagement_winner: string | null;
+      duration_winner: string | null;
+      download_winner: string | null;
+    };
+    time_range: string;
+    generated_at: string;
+  }> {
+    const response = await this.client.get('/api/analytics/cowrie/variant-study', {
+      params: { time_range: timeRange }
+    });
+    return response.data;
+  }
+
+  // Attack Surface Analysis
+  async getAttackSurfacePorts(timeRange: TimeRange = '24h', limit = 50): Promise<{
+    ports: Array<{
+      port: number;
+      hits: number;
+      unique_ips: number;
+      top_countries: string[];
+      service: string;
+    }>;
+    total_blocked: number;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/ports', {
+      params: { time_range: timeRange, limit }
+    });
+    return response.data;
+  }
+
+  async getAttackSurfaceScanners(timeRange: TimeRange = '24h', minPorts = 5, limit = 50): Promise<{
+    scanners: Array<{
+      ip: string;
+      total_events: number;
+      ports_scanned: number;
+      blocked: number;
+      passed: number;
+      duration_sec: number;
+      scan_rate: number;
+      scanner_type: string;
+      port_sample: number[];
+      country: string | null;
+      first_seen: string;
+      last_seen: string;
+    }>;
+    total_detected: number;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/scanners', {
+      params: { time_range: timeRange, min_ports: minPorts, limit }
+    });
+    return response.data;
+  }
+
+  async getAttackSurfaceBySensor(timeRange: TimeRange = '24h'): Promise<{
+    sensors: Array<{
+      ip: string;
+      total_events: number;
+      unique_attackers: number;
+      blocked: number;
+      passed: number;
+      top_ports: Array<{ port: number; hits: number; service: string }>;
+      top_countries: string[];
+    }>;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/by-sensor', {
+      params: { time_range: timeRange }
+    });
+    return response.data;
+  }
+
+  async getAttackSurfaceHeatmap(timeRange: TimeRange = '7d'): Promise<{
+    grid: Array<Record<string, number>>;
+    hourly_totals: number[];
+    daily_totals: Record<string, number>;
+    peak_hour: number;
+    peak_day: string;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/heatmap', {
+      params: { time_range: timeRange }
+    });
+    return response.data;
+  }
+
+  async getAttackSurfaceOpenVsAttacked(timeRange: TimeRange = '24h'): Promise<{
+    comparison: Array<{
+      port: number;
+      service: string;
+      honeypot: string | null;
+      is_open: boolean;
+      blocked: number;
+      passed: number;
+      total_attacks: number;
+      block_rate: number;
+    }>;
+    summary: {
+      open_ports: number;
+      attacked_open: number;
+      attacked_closed: number;
+      total_unique_attacked_ports: number;
+    };
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/open-vs-attacked', {
+      params: { time_range: timeRange }
+    });
+    return response.data;
+  }
+
+  async getAttackSurfaceTimeline(timeRange: TimeRange = '24h'): Promise<{
+    timeline: Array<{
+      timestamp: string;
+      total: number;
+      blocked: number;
+      passed: number;
+      unique_ips: number;
+    }>;
+    interval: string;
+    time_range: string;
+  }> {
+    const response = await this.client.get('/api/analytics/attack-surface/timeline', {
       params: { time_range: timeRange }
     });
     return response.data;

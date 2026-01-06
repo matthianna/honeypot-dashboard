@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Map,
@@ -13,9 +13,10 @@ import {
   Menu,
   X,
   ChevronDown,
-  BarChart2,
   Users,
-  FileText,
+  PanelLeftClose,
+  PanelLeft,
+  Crosshair,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import SessionTimeoutWarning from './SessionTimeoutWarning';
@@ -23,9 +24,9 @@ import SessionTimeoutWarning from './SessionTimeoutWarning';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Attack Map', href: '/attack-map', icon: Map },
-  { name: 'Analytics', href: '/analytics', icon: BarChart2 },
+  { name: 'Firewall Map', href: '/firewall-map', icon: ShieldAlert },
+  { name: 'MITRE ATT&CK', href: '/mitre', icon: Crosshair },
   { name: 'Attackers', href: '/attackers', icon: Users },
-  { name: 'Thesis Report', href: '/report', icon: FileText },
 ];
 
 const honeypots = [
@@ -42,6 +43,15 @@ export default function Layout() {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [honeypotsOpen, setHoneypotsOpen] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('honeypot_sidebarCollapsed');
+    return saved === 'true';
+  });
+
+  // Persist collapsed state
+  useEffect(() => {
+    localStorage.setItem('honeypot_sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
@@ -60,20 +70,22 @@ export default function Layout() {
 
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-bg-secondary border-r border-bg-card transform transition-transform duration-300 lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 bg-bg-secondary border-r border-bg-card transform transition-all duration-300 lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        } ${sidebarCollapsed ? 'lg:w-16' : 'lg:w-64'} w-64`}
       >
         <div className="flex flex-col h-full">
           {/* Logo */}
-          <div className="flex items-center justify-between h-16 px-4 border-b border-bg-card">
-            <div className="flex items-center space-x-2">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-neon-green to-neon-blue flex items-center justify-center">
+          <div className="flex items-center justify-between h-16 px-3 border-b border-bg-card">
+            <div className={`flex items-center ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-2'}`}>
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-neon-green to-neon-blue flex items-center justify-center flex-shrink-0">
                 <Shield className="w-5 h-5 text-bg-primary" />
               </div>
-              <span className="font-display font-bold text-lg text-neon-green">
-                HONEYPOT
-              </span>
+              {!sidebarCollapsed && (
+                <span className="font-display font-bold text-lg text-neon-green">
+                  HONEYPOT
+                </span>
+              )}
             </div>
             <button
               className="lg:hidden text-text-secondary hover:text-text-primary"
@@ -83,55 +95,72 @@ export default function Layout() {
             </button>
           </div>
 
+          {/* Collapse Toggle - Desktop only */}
+          <div className="hidden lg:flex items-center justify-center py-2 border-b border-bg-card">
+            <button
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="p-2 rounded-lg text-text-muted hover:text-white hover:bg-bg-hover transition-colors"
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {sidebarCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+            </button>
+          </div>
+
           {/* Navigation */}
-          <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
             {navigation.map((item) => (
               <NavLink
                 key={item.name}
                 to={item.href}
-                className={`flex items-center px-3 py-2 rounded-lg transition-all duration-200 ${
+                className={`flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'px-3'} py-2 rounded-lg transition-all duration-200 ${
                   isActive(item.href)
                     ? 'bg-bg-card text-neon-green shadow-neon-green'
                     : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
                 }`}
                 onClick={() => setSidebarOpen(false)}
+                title={sidebarCollapsed ? item.name : undefined}
               >
-                <item.icon className="w-5 h-5 mr-3" />
-                {item.name}
+                <item.icon className={`w-5 h-5 ${sidebarCollapsed ? '' : 'mr-3'}`} />
+                {!sidebarCollapsed && item.name}
               </NavLink>
             ))}
 
             {/* Honeypots Section */}
             <div className="pt-4">
-              <button
-                onClick={() => setHoneypotsOpen(!honeypotsOpen)}
-                className="flex items-center justify-between w-full px-3 py-2 text-text-secondary hover:text-text-primary transition-colors"
-              >
-                <span className="text-xs font-semibold uppercase tracking-wider">
-                  Honeypots
-                </span>
-                <ChevronDown
-                  className={`w-4 h-4 transition-transform ${
-                    honeypotsOpen ? 'rotate-180' : ''
-                  }`}
-                />
-              </button>
+              {!sidebarCollapsed ? (
+                <button
+                  onClick={() => setHoneypotsOpen(!honeypotsOpen)}
+                  className="flex items-center justify-between w-full px-3 py-2 text-text-secondary hover:text-text-primary transition-colors"
+                >
+                  <span className="text-xs font-semibold uppercase tracking-wider">
+                    Honeypots
+                  </span>
+                  <ChevronDown
+                    className={`w-4 h-4 transition-transform ${
+                      honeypotsOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+              ) : (
+                <div className="border-t border-bg-card my-2" />
+              )}
 
-              {honeypotsOpen && (
+              {(honeypotsOpen || sidebarCollapsed) && (
                 <div className="mt-1 space-y-1">
                   {honeypots.map((item) => (
                     <NavLink
                       key={item.name}
                       to={item.href}
-                      className={`flex items-center px-3 py-2 rounded-lg transition-all duration-200 ${
+                      className={`flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'px-3'} py-2 rounded-lg transition-all duration-200 ${
                         isActive(item.href)
                           ? `bg-bg-card ${item.color}`
                           : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
                       }`}
                       onClick={() => setSidebarOpen(false)}
+                      title={sidebarCollapsed ? item.name : undefined}
                     >
-                      <item.icon className={`w-5 h-5 mr-3 ${isActive(item.href) ? item.color : ''}`} />
-                      {item.name}
+                      <item.icon className={`w-5 h-5 ${sidebarCollapsed ? '' : 'mr-3'} ${isActive(item.href) ? item.color : ''}`} />
+                      {!sidebarCollapsed && item.name}
                     </NavLink>
                   ))}
                 </div>
@@ -140,18 +169,20 @@ export default function Layout() {
           </nav>
 
           {/* User section */}
-          <div className="p-4 border-t border-bg-card">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <div className="w-8 h-8 rounded-full bg-bg-card flex items-center justify-center">
-                  <span className="text-sm font-medium text-neon-blue">
-                    {user?.username?.charAt(0).toUpperCase() || 'A'}
+          <div className="p-3 border-t border-bg-card">
+            <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
+              {!sidebarCollapsed && (
+                <div className="flex items-center">
+                  <div className="w-8 h-8 rounded-full bg-bg-card flex items-center justify-center">
+                    <span className="text-sm font-medium text-neon-blue">
+                      {user?.username?.charAt(0).toUpperCase() || 'A'}
+                    </span>
+                  </div>
+                  <span className="ml-3 text-sm text-text-primary">
+                    {user?.username || 'Admin'}
                   </span>
                 </div>
-                <span className="ml-3 text-sm text-text-primary">
-                  {user?.username || 'Admin'}
-                </span>
-              </div>
+              )}
               <button
                 onClick={logout}
                 className="p-2 text-text-secondary hover:text-neon-red transition-colors"
@@ -165,7 +196,7 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <div className="lg:pl-64">
+      <div className={`transition-all duration-300 ${sidebarCollapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
         {/* Top bar */}
         <header className="sticky top-0 z-30 h-16 bg-bg-secondary/80 backdrop-blur-sm border-b border-bg-card flex items-center px-4 lg:px-6">
           <button
@@ -179,15 +210,15 @@ export default function Layout() {
             <h1 className="text-lg font-display font-semibold text-text-primary">
               {location.pathname === '/' && 'Dashboard'}
               {location.pathname === '/attack-map' && 'Attack Map'}
-              {location.pathname.startsWith('/analytics') && 'Analytics Dashboard'}
+              {location.pathname === '/firewall-map' && 'Firewall Attack Map'}
               {location.pathname === '/cowrie' && 'Cowrie SSH Honeypot'}
               {location.pathname === '/dionaea' && 'Dionaea Honeypot'}
               {location.pathname === '/galah' && 'Galah Web Honeypot'}
               {location.pathname === '/rdpy' && 'RDPY RDP Honeypot'}
               {location.pathname === '/heralding' && 'Heralding Honeypot'}
               {location.pathname === '/firewall' && 'Firewall (OPNsense)'}
-              {location.pathname === '/report' && 'Thesis Report'}
               {location.pathname === '/attackers' && 'Attackers'}
+              {location.pathname === '/mitre' && 'MITRE ATT&CK Analysis'}
             </h1>
           </div>
 

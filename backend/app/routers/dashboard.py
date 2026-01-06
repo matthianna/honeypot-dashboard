@@ -48,6 +48,7 @@ HONEYPOT_COLORS = {
 @router.get("/overview", response_model=DashboardOverview)
 async def get_dashboard_overview(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    exclude_firewall: bool = Query(default=True, description="Exclude firewall data from results"),
     _: str = Depends(get_current_user)
 ):
     """
@@ -55,29 +56,33 @@ async def get_dashboard_overview(
     
     Returns aggregated statistics including total events and unique IPs
     for each honeypot in the specified time range.
+    
+    Uses unified global stats method to ensure consistent counts.
+    By default, excludes firewall data completely.
     """
     es = get_es_service()
+    
+    # Use the unified global stats method for consistent numbers
+    global_stats = await es.get_global_stats(time_range)
+    
     honeypots: List[HoneypotStats] = []
     total_events = 0
-    all_ips = set()
+    total_unique_ips = 0
     
-    for name, index in es.INDICES.items():
-        events = await es.get_total_events(index, time_range)
-        unique_ips = await es.get_unique_ips(index, time_range)
-        
+    for name in es.INDICES.keys():
+        # Skip firewall if excluded
+        if exclude_firewall and name == "firewall":
+            continue
+            
+        hp_stats = global_stats["honeypots"].get(name, {"events": 0, "unique_ips": 0})
         honeypots.append(HoneypotStats(
             name=name,
-            total_events=events,
-            unique_ips=unique_ips,
+            total_events=hp_stats["events"],
+            unique_ips=hp_stats["unique_ips"],
             color=HONEYPOT_COLORS.get(name, "#ffffff")
         ))
-        
-        total_events += events
-    
-    # Get total unique IPs across all indices
-    total_unique_ips = 0
-    for _, index in es.INDICES.items():
-        total_unique_ips += await es.get_unique_ips(index, time_range)
+        total_events += hp_stats["events"]
+        total_unique_ips += hp_stats["unique_ips"]
     
     return DashboardOverview(
         honeypots=honeypots,
@@ -106,16 +111,19 @@ async def get_top_attackers(
     ip_data_map = {}  # ip -> {count, geo, sessions: [(first, last), ...]}
     
     # Index patterns with session field mappings
+    # For Cowrie, include both old (json.*) and new (cowrie.*) field structures
     INDEX_SESSION_FIELDS = {
-        ".ds-cowrie-*": {"ip": "json.src_ip", "session": "json.session", "geo": "source.geo"},
-        "dionaea-*": {"ip": "source.ip", "session": None, "geo": "source.geo"},
-        ".ds-galah-*": {"ip": "source.ip", "session": "session.id", "geo": "source.geo"},
-        ".ds-rdpy-*": {"ip": "source.ip", "session": None, "geo": "source.geo"},
-        ".ds-heralding-*": {"ip": "source.ip", "session": "session_id", "geo": "source.geo"},
+        ".ds-cowrie-*_old": {"index": ".ds-cowrie-*", "ip": "json.src_ip", "session": "json.session", "geo": "source.geo"},
+        ".ds-cowrie-*_new": {"index": ".ds-cowrie-*", "ip": "cowrie.src_ip", "session": "cowrie.session", "geo": "source.geo"},
+        "dionaea-*": {"index": "dionaea-*", "ip": "source.ip", "session": None, "geo": "source.geo"},
+        ".ds-galah-*": {"index": ".ds-galah-*", "ip": "source.ip", "session": "session.id", "geo": "source.geo"},
+        ".ds-rdpy-*": {"index": ".ds-rdpy-*", "ip": "source.ip", "session": None, "geo": "source.geo"},
+        ".ds-heralding-*": {"index": ".ds-heralding-*", "ip": "source.ip", "session": "session_id", "geo": "source.geo"},
     }
     
-    for index, fields in INDEX_SESSION_FIELDS.items():
+    for config_key, fields in INDEX_SESSION_FIELDS.items():
         try:
+            index = fields.get("index", config_key)
             # Query for top IPs with session aggregation
             aggs = {
                 "top_ips": {
@@ -245,7 +253,7 @@ async def get_dashboard_timeline(
     _: str = Depends(get_current_user)
 ):
     """
-    Get aggregated timeline across all honeypots.
+    Get aggregated timeline across all honeypots (EXCLUDING firewall).
     
     Returns event counts over time, suitable for charting.
     """
@@ -260,10 +268,14 @@ async def get_dashboard_timeline(
     }
     interval = intervals.get(time_range, "1h")
     
-    # Aggregate timeline data from all indices
+    # Aggregate timeline data from all indices EXCEPT firewall
     timeline_data = {}
     
-    for _, index in es.INDICES.items():
+    for name, index in es.INDICES.items():
+        # Skip firewall - it has its own dedicated map
+        if name == "firewall":
+            continue
+            
         timeline = await es.get_timeline(index, time_range, interval)
         
         for point in timeline:
@@ -339,34 +351,65 @@ async def get_geo_stats(
     _: str = Depends(get_current_user)
 ):
     """
-    Get geographic distribution of attacks across all honeypots.
+    Get geographic distribution of attacks across all honeypots (EXCLUDING firewall).
     
-    Returns attack counts by country.
+    Returns attack counts by country using unified country breakdown.
     """
     es = get_es_service()
-    country_counts = {}
     
-    for _, index in es.INDICES.items():
-        geo_data = await es.get_geo_distribution(index, time_range)
-        
-        for point in geo_data:
-            country = point["country"]
-            count = point["count"]
-            
-            if country in country_counts:
-                country_counts[country] += count
-            else:
-                country_counts[country] = count
-    
-    # Sort by count
-    sorted_data = sorted(country_counts.items(), key=lambda x: x[1], reverse=True)
+    # Use the unified country breakdown method but exclude firewall
+    country_breakdown = await es.get_global_country_breakdown(time_range, exclude_firewall=True)
     
     data = [
-        GeoPoint(country=country, count=count)
-        for country, count in sorted_data
+        GeoPoint(country=c["country"], count=c["total_events"])
+        for c in country_breakdown["countries"]
     ]
     
     return GeoDistributionResponse(data=data, time_range=time_range)
+
+
+@router.get("/unified-stats")
+async def get_unified_stats(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    exclude_firewall: bool = Query(default=True, description="Exclude firewall data from results"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get UNIFIED global statistics - single source of truth.
+    
+    Returns properly deduplicated counts for:
+    - Total unique IPs across all honeypots
+    - Total unique countries
+    - Total events by honeypot
+    - Country breakdown with proper IP deduplication
+    
+    By default excludes firewall data.
+    """
+    es = get_es_service()
+    
+    global_stats = await es.get_global_stats(time_range, exclude_firewall=exclude_firewall)
+    country_breakdown = await es.get_global_country_breakdown(time_range, exclude_firewall=exclude_firewall)
+    
+    # Filter out firewall from honeypots if excluded
+    honeypots = global_stats["honeypots"]
+    if exclude_firewall and "firewall" in honeypots:
+        honeypots = {k: v for k, v in honeypots.items() if k != "firewall"}
+    
+    # Recalculate totals without firewall
+    total_events = sum(hp["events"] for hp in honeypots.values())
+    total_unique_ips = sum(hp["unique_ips"] for hp in honeypots.values())
+    
+    return {
+        "time_range": time_range,
+        "summary": {
+            "total_unique_ips": total_unique_ips,
+            "total_unique_countries": global_stats["total_unique_countries"],
+            "total_events": total_events,
+        },
+        "honeypots": honeypots,
+        "countries": country_breakdown["countries"][:50],  # Top 50 countries
+        "all_countries_count": country_breakdown["total_countries"]
+    }
 
 
 @router.get("/protocol-distribution")
@@ -526,13 +569,210 @@ async def get_attack_velocity(
     max_rate = max(counts) if counts else 0
     current_rate = counts[-1] if counts else 0
     
+    # Determine trend
+    if len(counts) >= 10:
+        recent = sum(counts[-5:]) / 5
+        older = sum(counts[:5]) / 5
+        if recent > older * 1.2:
+            trend = "increasing"
+        elif recent < older * 0.8:
+            trend = "decreasing"
+        else:
+            trend = "stable"
+    else:
+        trend = "stable"
+    
     return {
         "velocity": velocity[-60:],  # Last 60 minutes
         "stats": {
             "avg_per_minute": round(avg_rate, 1),
             "max_per_minute": max_rate,
             "current_per_minute": current_rate
-        }
+        },
+        "current_rate": round(avg_rate, 1),
+        "trend": trend
+    }
+
+
+@router.get("/recent-activity")
+async def get_recent_activity(
+    limit: int = Query(default=10, ge=1, le=50),
+    _: str = Depends(get_current_user)
+):
+    """Get recent activity across all honeypots for live feed."""
+    es = get_es_service()
+    
+    events = []
+    
+    # Fetch recent events from each honeypot
+    honeypot_configs = {
+        "cowrie": {
+            "index": ".ds-cowrie-*",
+            "event_field": "json.eventid",
+            "ip_field": "json.src_ip",
+        },
+        "dionaea": {
+            "index": "dionaea-*",
+            "event_field": "type",
+            "ip_field": "source.ip",
+        },
+        "galah": {
+            "index": ".ds-galah-*",
+            "event_field": "msg",
+            "ip_field": "source.ip",
+        },
+        "rdpy": {
+            "index": ".ds-rdpy-*",
+            "event_field": "rdpy.type",
+            "ip_field": "source.ip",
+        },
+        "heralding": {
+            "index": ".ds-heralding-*",
+            "event_field": "protocol",
+            "ip_field": "source.ip",
+        },
+    }
+    
+    for honeypot, config in honeypot_configs.items():
+        try:
+            result = await es.search(
+                index=config["index"],
+                query=es._get_time_range_query("1h"),
+                size=5,
+                sort=[{"@timestamp": {"order": "desc"}}]
+            )
+            
+            for hit in result.get("hits", {}).get("hits", []):
+                src = hit.get("_source", {})
+                
+                # Extract event type - support both old (json.*) and new (cowrie.*) fields
+                event_type = (src.get("json", {}).get("eventid", "") or 
+                             src.get("cowrie", {}).get("eventid", "") or 
+                             src.get("type", "") or src.get("msg", "") or 
+                             src.get("protocol", "") or "event")
+                if isinstance(event_type, str):
+                    event_type = event_type.replace("cowrie.", "").replace("_", " ")[:30]
+                
+                # Extract IP - support both field structures
+                src_ip = (src.get("json", {}).get("src_ip") or 
+                         src.get("cowrie", {}).get("src_ip") or 
+                         src.get("source", {}).get("ip", ""))
+                
+                # Extract details - support both field structures
+                details = ""
+                if honeypot == "cowrie":
+                    json_data = src.get("json", {}) or src.get("cowrie", {})
+                    if "input" in json_data:
+                        details = f"cmd: {json_data['input'][:40]}"
+                    elif "username" in json_data:
+                        details = f"user: {json_data['username']}"
+                elif honeypot == "heralding":
+                    if "username" in src:
+                        details = f"user: {src.get('username', '')}"
+                
+                events.append({
+                    "timestamp": src.get("@timestamp", ""),
+                    "honeypot": honeypot,
+                    "event_type": event_type,
+                    "src_ip": src_ip,
+                    "details": details,
+                })
+        except Exception:
+            continue
+    
+    # Sort by timestamp and limit
+    events.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return {"events": events[:limit]}
+
+
+@router.get("/credentials")
+async def get_dashboard_credentials(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get credential statistics for dashboard."""
+    es = get_es_service()
+    
+    total_attempts = 0
+    username_counts = {}
+    password_counts = {}
+    
+    # Cowrie login attempts
+    try:
+        result = await es.search(
+            index=".ds-cowrie-*",
+            query={
+                "bool": {
+                    "must": [
+                        es._get_time_range_query(time_range),
+                        {"bool": {"should": [
+                            {"term": {"json.eventid": "cowrie.login.success"}},
+                            {"term": {"json.eventid": "cowrie.login.failed"}},
+                            {"term": {"cowrie.eventid": "cowrie.login.success"}},
+                            {"term": {"cowrie.eventid": "cowrie.login.failed"}},
+                        ], "minimum_should_match": 1}}
+                    ]
+                }
+            },
+            size=0,
+            aggs={
+                "total": {"value_count": {"field": "@timestamp"}},
+                "usernames": {"terms": {"field": "json.username", "size": 10}},
+                "passwords": {"terms": {"field": "json.password", "size": 10}},
+            }
+        )
+        
+        total_attempts += result.get("aggregations", {}).get("total", {}).get("value", 0)
+        
+        for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
+            username_counts[bucket["key"]] = username_counts.get(bucket["key"], 0) + bucket["doc_count"]
+        
+        for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
+            password_counts[bucket["key"]] = password_counts.get(bucket["key"], 0) + bucket["doc_count"]
+    except Exception:
+        pass
+    
+    # Heralding attempts
+    try:
+        result = await es.search(
+            index=".ds-heralding-*",
+            query=es._get_time_range_query(time_range),
+            size=0,
+            aggs={
+                "total": {"value_count": {"field": "@timestamp"}},
+                "usernames": {"terms": {"field": "username", "size": 10}},
+                "passwords": {"terms": {"field": "password", "size": 10}},
+            }
+        )
+        
+        total_attempts += result.get("aggregations", {}).get("total", {}).get("value", 0)
+        
+        for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
+            username_counts[bucket["key"]] = username_counts.get(bucket["key"], 0) + bucket["doc_count"]
+        
+        for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
+            password_counts[bucket["key"]] = password_counts.get(bucket["key"], 0) + bucket["doc_count"]
+    except Exception:
+        pass
+    
+    # Sort and get top entries
+    top_usernames = sorted(
+        [{"username": k, "count": v} for k, v in username_counts.items()],
+        key=lambda x: -x["count"]
+    )[:10]
+    
+    top_passwords = sorted(
+        [{"password": k, "count": v} for k, v in password_counts.items()],
+        key=lambda x: -x["count"]
+    )[:10]
+    
+    return {
+        "total_attempts": total_attempts,
+        "unique_usernames": len(username_counts),
+        "unique_passwords": len(password_counts),
+        "top_usernames": top_usernames,
+        "top_passwords": top_passwords,
     }
 
 
@@ -554,25 +794,26 @@ async def get_threat_summary(
         "credential_harvesting": 0,
     }
     
-    # Cowrie: login attempts and commands
-    try:
-        result = await es.search(
-            index=es.INDICES["cowrie"],
-            query=es._get_time_range_query(time_range),
-            size=0,
-            aggs={
-                "by_event": {"terms": {"field": "json.eventid", "size": 20}}
-            }
-        )
-        for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
-            event = bucket["key"]
-            count = bucket["doc_count"]
-            if "login" in event:
-                summary["login_attempts"] += count
-            elif "command" in event or "input" in event:
-                summary["command_execution"] += count
-    except Exception:
-        pass
+    # Cowrie: login attempts and commands - support both old and new field structures
+    for eventid_field in ["json.eventid", "cowrie.eventid"]:
+        try:
+            result = await es.search(
+                index=es.INDICES["cowrie"],
+                query=es._get_time_range_query(time_range),
+                size=0,
+                aggs={
+                    "by_event": {"terms": {"field": eventid_field, "size": 20}}
+                }
+            )
+            for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
+                event = bucket["key"]
+                count = bucket["doc_count"]
+                if "login" in event:
+                    summary["login_attempts"] += count
+                elif "command" in event or "input" in event:
+                    summary["command_execution"] += count
+        except Exception:
+            pass
     
     # Heralding: credential attempts
     try:
@@ -622,30 +863,32 @@ async def get_mitre_coverage(
     # Count events that map to each technique
     
     # Cowrie: Brute Force (T1110), Valid Accounts (T1078), Unix Shell (T1059.004)
-    try:
-        result = await es.search(
-            index=es.INDICES["cowrie"],
-            query=es._get_time_range_query(time_range),
-            size=0,
-            aggs={
-                "by_event": {"terms": {"field": "json.eventid", "size": 50}}
-            }
-        )
-        for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
-            event = bucket["key"]
-            count = bucket["doc_count"]
-            if "login.failed" in event:
-                technique_counts["T1110.001"] = technique_counts.get("T1110.001", 0) + count
-                technique_counts["T1110"] = technique_counts.get("T1110", 0) + count
-            elif "login.success" in event:
-                technique_counts["T1078"] = technique_counts.get("T1078", 0) + count
-            elif "command" in event or "input" in event:
-                technique_counts["T1059.004"] = technique_counts.get("T1059.004", 0) + count
-                technique_counts["T1059"] = technique_counts.get("T1059", 0) + count
-            elif "session.connect" in event:
-                technique_counts["T1021.004"] = technique_counts.get("T1021.004", 0) + count
-    except Exception:
-        pass
+    # Support both old (json.*) and new (cowrie.*) field structures
+    for eventid_field in ["json.eventid", "cowrie.eventid"]:
+        try:
+            result = await es.search(
+                index=es.INDICES["cowrie"],
+                query=es._get_time_range_query(time_range),
+                size=0,
+                aggs={
+                    "by_event": {"terms": {"field": eventid_field, "size": 50}}
+                }
+            )
+            for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
+                event = bucket["key"]
+                count = bucket["doc_count"]
+                if "login.failed" in event:
+                    technique_counts["T1110.001"] = technique_counts.get("T1110.001", 0) + count
+                    technique_counts["T1110"] = technique_counts.get("T1110", 0) + count
+                elif "login.success" in event:
+                    technique_counts["T1078"] = technique_counts.get("T1078", 0) + count
+                elif "command" in event or "input" in event:
+                    technique_counts["T1059.004"] = technique_counts.get("T1059.004", 0) + count
+                    technique_counts["T1059"] = technique_counts.get("T1059", 0) + count
+                elif "session.connect" in event:
+                    technique_counts["T1021.004"] = technique_counts.get("T1021.004", 0) + count
+        except Exception:
+            pass
     
     # Heralding: Brute Force (T1110), External Remote Services (T1133)
     try:
@@ -780,17 +1023,21 @@ async def get_threat_intel(
     # Get IPs from each honeypot
     honeypot_ips = {}
     
-    # Cowrie
-    try:
-        result = await es.search(
-            index=es.INDICES["cowrie"],
-            query=es._get_time_range_query(time_range),
-            size=0,
-            aggs={"ips": {"terms": {"field": "json.src_ip", "size": 500}}}
-        )
-        honeypot_ips["cowrie"] = {b["key"]: b["doc_count"] for b in result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
-    except Exception:
-        honeypot_ips["cowrie"] = {}
+    # Cowrie - support both old and new field structures
+    honeypot_ips["cowrie"] = {}
+    for ip_field in ["json.src_ip", "cowrie.src_ip"]:
+        try:
+            result = await es.search(
+                index=es.INDICES["cowrie"],
+                query=es._get_time_range_query(time_range),
+                size=0,
+                aggs={"ips": {"terms": {"field": ip_field, "size": 500}}}
+            )
+            for b in result.get("aggregations", {}).get("ips", {}).get("buckets", []):
+                ip = b["key"]
+                honeypot_ips["cowrie"][ip] = honeypot_ips["cowrie"].get(ip, 0) + b["doc_count"]
+        except Exception:
+            pass
     
     # Galah
     try:
@@ -898,34 +1145,36 @@ async def get_top_threat_actors(
     ip_scores = {}
     
     # Get data from each honeypot
+    # For Cowrie, use both old (json.src_ip) and new (cowrie.src_ip) field structures
     honeypots = ["cowrie", "galah", "dionaea", "heralding", "rdpy"]
     ip_fields = {
-        "cowrie": "json.src_ip",
-        "galah": "source.ip",
-        "dionaea": "source.ip.keyword",
-        "heralding": "source.ip",
-        "rdpy": "source.ip",
+        "cowrie": ["json.src_ip", "cowrie.src_ip"],  # Both old and new
+        "galah": ["source.ip"],
+        "dionaea": ["source.ip.keyword"],
+        "heralding": ["source.ip"],
+        "rdpy": ["source.ip"],
     }
     
     for hp in honeypots:
-        try:
-            result = await es.search(
-                index=es.INDICES.get(hp, f".ds-{hp}-*"),
-                query=es._get_time_range_query(time_range),
-                size=0,
-                aggs={"ips": {"terms": {"field": ip_fields[hp], "size": 200}}}
-            )
-            for bucket in result.get("aggregations", {}).get("ips", {}).get("buckets", []):
-                ip = bucket["key"]
-                if is_internal_ip(ip):
-                    continue
-                if ip not in ip_scores:
-                    ip_scores[ip] = {"ip": ip, "honeypots": set(), "total_events": 0, "honeypot_details": {}}
-                ip_scores[ip]["honeypots"].add(hp)
-                ip_scores[ip]["total_events"] += bucket["doc_count"]
-                ip_scores[ip]["honeypot_details"][hp] = bucket["doc_count"]
-        except Exception:
-            pass
+        for ip_field in ip_fields[hp]:
+            try:
+                result = await es.search(
+                    index=es.INDICES.get(hp, f".ds-{hp}-*"),
+                    query=es._get_time_range_query(time_range),
+                    size=0,
+                    aggs={"ips": {"terms": {"field": ip_field, "size": 200}}}
+                )
+                for bucket in result.get("aggregations", {}).get("ips", {}).get("buckets", []):
+                    ip = bucket["key"]
+                    if is_internal_ip(ip):
+                        continue
+                    if ip not in ip_scores:
+                        ip_scores[ip] = {"ip": ip, "honeypots": set(), "total_events": 0, "honeypot_details": {}}
+                    ip_scores[ip]["honeypots"].add(hp)
+                    ip_scores[ip]["total_events"] += bucket["doc_count"]
+                    ip_scores[ip]["honeypot_details"][hp] = ip_scores[ip]["honeypot_details"].get(hp, 0) + bucket["doc_count"]
+            except Exception:
+                pass
     
     # Calculate threat score (weighted by diversity and volume)
     threat_actors = []

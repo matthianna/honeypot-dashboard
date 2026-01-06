@@ -125,8 +125,8 @@ def create_app() -> FastAPI:
     from app.routers.heralding import router as heralding_router
     from app.routers.firewall import router as firewall_router
     from app.routers.attackmap import router as attackmap_router
+    from app.routers.firewallmap import router as firewallmap_router
     from app.routers.attacker import router as attacker_router
-    from app.routers.report import router as report_router
     from app.routers.analytics import router as analytics_router
     
     # Include routers
@@ -139,8 +139,8 @@ def create_app() -> FastAPI:
     app.include_router(heralding_router, prefix="/api/heralding", tags=["Heralding"])
     app.include_router(firewall_router, prefix="/api/firewall", tags=["Firewall"])
     app.include_router(attackmap_router, prefix="/api/attackmap", tags=["Attack Map"])
+    app.include_router(firewallmap_router, prefix="/api/firewallmap", tags=["Firewall Map"])
     app.include_router(attacker_router, prefix="/api/attacker", tags=["Attacker"])
-    app.include_router(report_router, prefix="/api/report", tags=["Thesis Report"])
     app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
     
     return app

@@ -1348,3 +1348,216 @@ async def get_galah_llm_stats(
         "models": models,
         "timeline": timeline[-48:] if len(timeline) > 48 else timeline  # Last 48 hours
     }
+
+
+# ==================== ATTACKER VIEW ENDPOINTS ====================
+
+@router.get("/attackers")
+async def get_galah_attackers(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    _: str = Depends(get_current_user)
+):
+    """Get all attackers (unique IPs) with their attack counts and session info."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            "attackers": {
+                "terms": {"field": "source.ip", "size": limit},
+                "aggs": {
+                    "sessions": {"cardinality": {"field": "session.id"}},
+                    "paths": {"cardinality": {"field": "url.path"}},
+                    "first_seen": {"min": {"field": "@timestamp"}},
+                    "last_seen": {"max": {"field": "@timestamp"}},
+                    "methods": {"terms": {"field": "http.request.method", "size": 10}},
+                    "geo": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["source.geo.country_name", "source.geo.city_name"]
+                        }
+                    }
+                }
+            },
+            "total_attackers": {"cardinality": {"field": "source.ip"}}
+        }
+    )
+    
+    attackers = []
+    for bucket in result.get("aggregations", {}).get("attackers", {}).get("buckets", []):
+        geo_hit = bucket.get("geo", {}).get("hits", {}).get("hits", [{}])[0]
+        geo_source = geo_hit.get("_source", {}).get("source", {}).get("geo", {})
+        
+        methods = [m["key"] for m in bucket.get("methods", {}).get("buckets", [])]
+        
+        attackers.append({
+            "ip": bucket["key"],
+            "total_requests": bucket["doc_count"],
+            "sessions": bucket.get("sessions", {}).get("value", 0),
+            "unique_paths": bucket.get("paths", {}).get("value", 0),
+            "first_seen": bucket.get("first_seen", {}).get("value_as_string"),
+            "last_seen": bucket.get("last_seen", {}).get("value_as_string"),
+            "methods": methods,
+            "country": geo_source.get("country_name"),
+            "city": geo_source.get("city_name"),
+        })
+    
+    return {
+        "attackers": attackers,
+        "total": result.get("aggregations", {}).get("total_attackers", {}).get("value", 0),
+        "time_range": time_range
+    }
+
+
+@router.get("/attacker/{ip}/sessions")
+async def get_galah_attacker_sessions(
+    ip: str,
+    time_range: str = Query(default="30d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get all sessions for a specific attacker IP."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={
+            "bool": {
+                "must": [
+                    es._get_time_range_query(time_range),
+                    {"term": {"source.ip": ip}}
+                ]
+            }
+        },
+        size=0,
+        aggs={
+            "sessions": {
+                "terms": {"field": "session.id", "size": 100},
+                "aggs": {
+                    "request_count": {"value_count": {"field": "@timestamp"}},
+                    "first_request": {"min": {"field": "@timestamp"}},
+                    "last_request": {"max": {"field": "@timestamp"}},
+                    "paths": {"terms": {"field": "url.path", "size": 20}},
+                    "methods": {"terms": {"field": "http.request.method", "size": 10}},
+                    "sample": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["http.request.method", "url.path", "user_agent.original"]
+                        }
+                    }
+                }
+            }
+        }
+    )
+    
+    sessions = []
+    for bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+        first = bucket.get("first_request", {}).get("value_as_string")
+        last = bucket.get("last_request", {}).get("value_as_string")
+        
+        # Calculate duration
+        duration = None
+        if first and last:
+            try:
+                from datetime import datetime
+                first_dt = datetime.fromisoformat(first.replace("Z", "+00:00"))
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                duration = (last_dt - first_dt).total_seconds()
+            except Exception:
+                pass
+        
+        paths = [p["key"] for p in bucket.get("paths", {}).get("buckets", [])]
+        methods = [m["key"] for m in bucket.get("methods", {}).get("buckets", [])]
+        
+        sample = bucket.get("sample", {}).get("hits", {}).get("hits", [{}])[0].get("_source", {})
+        
+        sessions.append({
+            "session_id": bucket["key"],
+            "request_count": bucket.get("request_count", {}).get("value", 0),
+            "first_request": first,
+            "last_request": last,
+            "duration_seconds": duration,
+            "paths": paths[:5],  # Top 5 paths
+            "methods": methods,
+            "user_agent": sample.get("user_agent", {}).get("original"),
+        })
+    
+    # Sort by first request (most recent first)
+    sessions.sort(key=lambda x: x["first_request"] or "", reverse=True)
+    
+    return {
+        "ip": ip,
+        "sessions": sessions,
+        "total_sessions": len(sessions),
+        "time_range": time_range
+    }
+
+
+@router.get("/session/{session_id}/replay")
+async def get_galah_session_replay(
+    session_id: str,
+    _: str = Depends(get_current_user)
+):
+    """Get full session replay - all requests/responses in order."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={"term": {"session.id": session_id}},
+        size=500,
+        sort=[{"@timestamp": "asc"}]
+    )
+    
+    events = []
+    session_info = {}
+    
+    for i, hit in enumerate(result.get("hits", {}).get("hits", [])):
+        source = hit["_source"]
+        
+        # Extract session info from first event
+        if i == 0:
+            session_info = {
+                "source_ip": source.get("source", {}).get("ip"),
+                "country": source.get("source", {}).get("geo", {}).get("country_name"),
+                "city": source.get("source", {}).get("geo", {}).get("city_name"),
+                "user_agent": source.get("user_agent", {}).get("original"),
+            }
+        
+        # Build event
+        http_req = source.get("http", {}).get("request", {})
+        http_resp = source.get("http", {}).get("response", {})
+        
+        events.append({
+            "sequence": i + 1,
+            "timestamp": source.get("@timestamp"),
+            "method": http_req.get("method"),
+            "path": source.get("url", {}).get("path"),
+            "query": source.get("url", {}).get("query"),
+            "request_body": http_req.get("body", {}).get("content"),
+            "response_status": http_resp.get("status_code"),
+            "response_body": http_resp.get("body", {}).get("content"),
+            "response_mime": http_resp.get("mime_type"),
+            "ai_generated": source.get("responseMetadata", {}).get("generationSource") == "llm",
+            "ai_model": source.get("responseMetadata", {}).get("info", {}).get("model"),
+        })
+    
+    # Calculate session duration
+    duration = None
+    if len(events) >= 2:
+        try:
+            from datetime import datetime
+            first = datetime.fromisoformat(events[0]["timestamp"].replace("Z", "+00:00"))
+            last = datetime.fromisoformat(events[-1]["timestamp"].replace("Z", "+00:00"))
+            duration = (last - first).total_seconds()
+        except Exception:
+            pass
+    
+    return {
+        "session_id": session_id,
+        "info": session_info,
+        "events": events,
+        "total_events": len(events),
+        "duration_seconds": duration
+    }

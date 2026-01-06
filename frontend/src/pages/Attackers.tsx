@@ -125,7 +125,7 @@ export const Attackers: React.FC = () => {
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [selectedAttacker, setSelectedAttacker] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [viewMode, setViewMode] = useState<'countries' | 'top' | 'cross-honeypot'>('countries');
+  const [viewMode, setViewMode] = useState<'countries' | 'top' | 'cross-honeypot' | 'unknown'>('countries');
 
   // Fetch countries data
   const { data: countriesData, loading: countriesLoading } = useApiWithRefresh(
@@ -171,6 +171,16 @@ export const Attackers: React.FC = () => {
     return topAttackersData.attackers.filter((a: TopAttacker) => 
       a.ip.includes(searchQuery) || a.country.toLowerCase().includes(searchQuery.toLowerCase())
     );
+  }, [topAttackersData, searchQuery]);
+
+  // Filter attackers with unknown/undefined location
+  const unknownLocationAttackers = useMemo((): TopAttacker[] => {
+    if (!topAttackersData?.attackers) return [];
+    const unknownFiltered = topAttackersData.attackers.filter((a: TopAttacker) => 
+      !a.country || a.country === 'Unknown' || a.country === '' || a.country === 'N/A'
+    );
+    if (!searchQuery) return unknownFiltered;
+    return unknownFiltered.filter((a: TopAttacker) => a.ip.includes(searchQuery));
   }, [topAttackersData, searchQuery]);
 
   const formatNumber = (num: number): string => {
@@ -304,6 +314,17 @@ export const Attackers: React.FC = () => {
             <Activity className="w-4 h-4 inline mr-2" />
             Cross-Honeypot
           </button>
+          <button
+            onClick={() => setViewMode('unknown')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              viewMode === 'unknown' 
+                ? 'bg-neon-yellow text-bg-primary' 
+                : 'text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            <AlertTriangle className="w-4 h-4 inline mr-2" />
+            Unknown Location
+          </button>
         </div>
 
         <div className="relative w-full sm:w-64">
@@ -323,16 +344,18 @@ export const Attackers: React.FC = () => {
         <div className="lg:col-span-1">
           <Card className="h-[700px] flex flex-col">
             <CardHeader 
-              title={viewMode === 'countries' ? 'Attack Sources' : viewMode === 'top' ? 'Top Attackers' : 'Multi-Honeypot Actors'}
+              title={viewMode === 'countries' ? 'Attack Sources' : viewMode === 'top' ? 'Top Attackers' : viewMode === 'unknown' ? 'Unknown Location' : 'Multi-Honeypot Actors'}
               subtitle={viewMode === 'countries' 
                 ? `${filteredCountries.length} countries` 
                 : viewMode === 'top' 
                   ? `${filteredTopAttackers.length} attackers`
-                  : `${threatIntel?.cross_honeypot_actors?.length || 0} actors (${threatIntel?.summary?.multi_percentage || 0}% of total)`}
-              icon={viewMode === 'countries' ? <Globe className="w-5 h-5" /> : viewMode === 'top' ? <Users className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
+                  : viewMode === 'unknown'
+                    ? `${unknownLocationAttackers.length} attackers without geo data`
+                    : `${threatIntel?.cross_honeypot_actors?.length || 0} actors (${threatIntel?.summary?.multi_percentage || 0}% of total)`}
+              icon={viewMode === 'countries' ? <Globe className="w-5 h-5" /> : viewMode === 'top' ? <Users className="w-5 h-5" /> : viewMode === 'unknown' ? <AlertTriangle className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
             />
             <CardContent className="flex-1 overflow-y-auto p-0">
-              {(viewMode === 'countries' ? countriesLoading : topLoading) ? (
+              {(viewMode === 'countries' ? countriesLoading : viewMode === 'top' || viewMode === 'unknown' ? topLoading : threatIntelLoading) ? (
                 <div className="h-full flex items-center justify-center">
                   <LoadingSpinner />
                 </div>
@@ -406,6 +429,51 @@ export const Attackers: React.FC = () => {
                       </div>
                     </button>
                   ))}
+                </div>
+              ) : viewMode === 'unknown' ? (
+                <div className="divide-y divide-bg-hover">
+                  {unknownLocationAttackers.length > 0 ? (
+                    unknownLocationAttackers.map((attacker: TopAttacker, index: number) => (
+                      <button
+                        key={attacker.ip}
+                        onClick={() => setSelectedAttacker(attacker.ip)}
+                        className="w-full p-4 text-left hover:bg-bg-hover transition-colors"
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono text-text-muted w-6">#{index + 1}</span>
+                            <span className="font-mono text-neon-yellow">{attacker.ip}</span>
+                          </div>
+                          <span className="font-mono text-neon-orange">{formatNumber(attacker.total_events)}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-sm">
+                          <div className="flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-neon-yellow" />
+                            <span className="text-text-muted italic">No geo data available</span>
+                          </div>
+                          <span className="text-text-muted text-xs">{formatTimeAgo(attacker.last_seen)}</span>
+                        </div>
+                        <div className="flex gap-1 mt-2">
+                          {attacker.honeypots.map((hp: string) => (
+                            <span
+                              key={hp}
+                              className="px-2 py-0.5 rounded-full text-xs"
+                              style={{ backgroundColor: `${HONEYPOT_COLORS[hp]}20`, color: HONEYPOT_COLORS[hp] }}
+                            >
+                              {HONEYPOT_ICONS[hp]}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="p-8 text-center">
+                      <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-neon-green/10 flex items-center justify-center">
+                        <Globe className="w-8 h-8 text-neon-green" />
+                      </div>
+                      <p className="text-text-secondary">All attackers have known locations</p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* Cross-Honeypot View */

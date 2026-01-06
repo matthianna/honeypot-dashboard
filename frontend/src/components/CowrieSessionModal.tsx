@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { X, Terminal, Key, Clock, Globe, Server, ChevronDown, CheckCircle, XCircle } from 'lucide-react';
+import { X, Terminal, Key, Clock, Globe, Server, ChevronDown, CheckCircle, XCircle, Play } from 'lucide-react';
 import api from '../services/api';
 import LoadingSpinner from './LoadingSpinner';
+import SessionReplay from './SessionReplay';
 
 interface SessionDetails {
   session_id: string;
@@ -32,7 +33,7 @@ export default function CowrieSessionModal({ sessionId, onClose }: CowrieSession
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedEvents, setExpandedEvents] = useState(false);
-  const [activeTab, setActiveTab] = useState<'commands' | 'credentials' | 'events'>('commands');
+  const [activeTab, setActiveTab] = useState<'replay' | 'commands' | 'credentials' | 'events'>('replay');
 
   useEffect(() => {
     const fetchDetails = async () => {
@@ -162,6 +163,7 @@ export default function CowrieSessionModal({ sessionId, onClose }: CowrieSession
             {/* Tabs */}
             <div className="flex border-b border-bg-hover">
               {[
+                { id: 'replay', label: 'Session Replay', icon: Play },
                 { id: 'commands', label: `Commands (${details.commands.length})`, icon: Terminal },
                 { id: 'credentials', label: `Credentials (${details.credentials.length})`, icon: Key },
                 { id: 'events', label: `Events (${details.total_events})`, icon: Clock },
@@ -183,6 +185,15 @@ export default function CowrieSessionModal({ sessionId, onClose }: CowrieSession
 
             {/* Tab Content */}
             <div className="flex-1 overflow-y-auto p-4">
+              {/* Replay Tab */}
+              {activeTab === 'replay' && (
+                <SessionReplay 
+                  commands={details.commands} 
+                  autoPlay={false}
+                  speed={2}
+                />
+              )}
+
               {/* Commands Tab */}
               {activeTab === 'commands' && (
                 <div className="space-y-2">

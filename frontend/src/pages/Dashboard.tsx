@@ -7,18 +7,14 @@ import {
   ArrowRight,
   TrendingUp,
   TrendingDown,
-  Zap,
   Shield,
   Terminal,
   Bug,
   Monitor,
-  ShieldAlert,
-  MapPin,
   Clock,
-  Target,
-  Skull,
-  Eye,
   Radio,
+  Zap,
+  Target,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -27,12 +23,13 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
   BarChart,
   Bar,
-  Cell,
 } from 'recharts';
 import TimeRangeSelector from '../components/TimeRangeSelector';
-import IPLink from '../components/IPLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
@@ -45,7 +42,6 @@ const HONEYPOT_ICONS: Record<string, typeof Terminal> = {
   galah: Globe,
   rdpy: Monitor,
   heralding: Shield,
-  firewall: ShieldAlert,
 };
 
 export default function Dashboard() {
@@ -66,12 +62,6 @@ export default function Dashboard() {
     15000
   );
 
-  const { data: topAttackers, loading: attackersLoading } = useApiWithRefresh(
-    useCallback(() => api.getTopAttackers(timeRange, 5), [timeRange]),
-    [timeRange],
-    30000
-  );
-
   const { data: timeline, loading: timelineLoading } = useApiWithRefresh(
     useCallback(() => api.getDashboardTimeline(timeRange), [timeRange]),
     [timeRange],
@@ -81,24 +71,6 @@ export default function Dashboard() {
   const { data: geoStats, loading: geoLoading } = useApiWithRefresh(
     useCallback(() => api.getGeoStats(timeRange), [timeRange]),
     [timeRange],
-    30000
-  );
-
-  const { data: velocity } = useApiWithRefresh(
-    useCallback(() => api.getAttackVelocity(), []),
-    [],
-    5000
-  );
-
-  const { data: threatIntel } = useApiWithRefresh(
-    useCallback(() => api.getThreatIntel(timeRange), [timeRange]),
-    [timeRange],
-    60000
-  );
-
-  const { data: honeypotHealth, loading: healthLoading } = useApiWithRefresh(
-    useCallback(() => api.getHoneypotHealth(), []),
-    [],
     30000
   );
 
@@ -141,25 +113,77 @@ export default function Dashboard() {
     }
   }, [overview?.total_events]);
 
-  // Calculate trend
+  // Calculate trend from timeline data
   const trend = useMemo(() => {
-    if (!velocity?.velocity || velocity.velocity.length < 2) return { direction: 'stable', percentage: 0 };
-    const recent = velocity.velocity.slice(-5).reduce((s, v) => s + v.count, 0) / 5;
-    const older = velocity.velocity.slice(0, 5).reduce((s, v) => s + v.count, 0) / 5;
+    if (!timeline?.data || timeline.data.length < 4) return { direction: 'stable', percentage: 0 };
+    const data = timeline.data;
+    const midpoint = Math.floor(data.length / 2);
+    const recent = data.slice(midpoint).reduce((s: number, v: { count: number }) => s + v.count, 0) / (data.length - midpoint);
+    const older = data.slice(0, midpoint).reduce((s: number, v: { count: number }) => s + v.count, 0) / midpoint;
     const pct = older > 0 ? ((recent - older) / older) * 100 : 0;
     return {
       direction: pct > 10 ? 'up' : pct < -10 ? 'down' : 'stable',
       percentage: Math.abs(pct).toFixed(1),
     };
-  }, [velocity]);
+  }, [timeline]);
 
-  const formatTime = (ts: string) => {
+  // Format timeline axis based on time range
+  const formatTimelineAxis = useCallback((ts: string) => {
     try {
-      return new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+      const date = new Date(ts);
+      // Show date for 7d and 30d ranges
+      if (timeRange === '7d' || timeRange === '30d') {
+        return date.toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric',
+          hour: '2-digit',
+        }).replace(',', '');
+      }
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return ts;
+    }
+  }, [timeRange]);
+
+  // Format tooltip label with full date/time
+  const formatTooltipLabel = (ts: string) => {
+    try {
+      const date = new Date(ts);
+      if (timeRange === '7d' || timeRange === '30d') {
+        return date.toLocaleString('en-US', { 
+          weekday: 'short',
+          month: 'short', 
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      }
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     } catch {
       return ts;
     }
   };
+
+  // Prepare honeypot distribution data with improved formatting
+  const honeypotDistributionData = useMemo(() => {
+    if (!overview?.honeypots) return [];
+    
+    const filtered = overview.honeypots
+      .filter(h => h.total_events > 0 && h.name !== 'firewall')
+      .sort((a, b) => b.total_events - a.total_events);
+    
+    const total = filtered.reduce((sum, h) => sum + h.total_events, 0);
+    
+    return filtered.map(h => ({
+      name: HONEYPOT_NAMES[h.name as HoneypotType] || h.name,
+      shortName: h.name.charAt(0).toUpperCase() + h.name.slice(1, 4),
+      value: h.total_events,
+      uniqueIPs: h.unique_ips,
+      color: HONEYPOT_COLORS[h.name as HoneypotType] || '#888',
+      percentage: ((h.total_events / total) * 100).toFixed(1),
+      fill: HONEYPOT_COLORS[h.name as HoneypotType] || '#888',
+    }));
+  }, [overview]);
 
   return (
     <div className="space-y-8">
@@ -229,109 +253,6 @@ export default function Dashboard() {
               <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
             </div>
           </div>
-
-          {/* Quick Stats Bar */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-8">
-            <QuickStat
-              icon={<Zap className="w-5 h-5" />}
-              label="Current Rate"
-              value={`${velocity?.stats?.current_per_minute || 0}/min`}
-              color="green"
-            />
-            <QuickStat
-              icon={<Target className="w-5 h-5" />}
-              label="Peak Rate"
-              value={`${velocity?.stats?.max_per_minute || 0}/min`}
-              color="orange"
-            />
-            <QuickStat
-              icon={<Skull className="w-5 h-5" />}
-              label="Multi-Target Attackers"
-              value={threatIntel?.summary?.multi_honeypot_attackers || 0}
-              color="red"
-            />
-            <QuickStat
-              icon={<Eye className="w-5 h-5" />}
-              label="Avg Rate"
-              value={`${velocity?.stats?.avg_per_minute || 0}/min`}
-              color="blue"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Honeypot Health Status */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-display font-bold text-white">System Health</h2>
-            {honeypotHealth && (
-              <span className={`px-2 py-0.5 text-xs rounded-full ${
-                honeypotHealth.summary.overall_status === 'healthy' ? 'bg-neon-green/20 text-neon-green' :
-                honeypotHealth.summary.overall_status === 'warning' ? 'bg-neon-orange/20 text-neon-orange' :
-                'bg-neon-red/20 text-neon-red'
-              }`}>
-                {honeypotHealth.summary.healthy}/{honeypotHealth.summary.total} Online
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          {healthLoading ? (
-            Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="bg-bg-card rounded-lg p-3 animate-pulse border border-bg-hover">
-                <div className="h-4 bg-bg-hover rounded w-1/2 mb-2" />
-                <div className="h-6 bg-bg-hover rounded w-2/3" />
-              </div>
-            ))
-          ) : (
-            honeypotHealth?.honeypots?.map((hp) => {
-              const statusColors: Record<string, string> = {
-                healthy: 'bg-neon-green',
-                warning: 'bg-neon-orange',
-                stale: 'bg-neon-red',
-                offline: 'bg-text-muted',
-                error: 'bg-neon-red',
-                unknown: 'bg-text-muted',
-              };
-              const statusText: Record<string, string> = {
-                healthy: 'Live',
-                warning: 'Delayed',
-                stale: 'Stale',
-                offline: 'Offline',
-                error: 'Error',
-                unknown: 'Unknown',
-              };
-              
-              return (
-                <Link
-                  key={hp.id}
-                  to={`/${hp.id}`}
-                  className="group bg-bg-card rounded-lg p-3 border border-bg-hover hover:border-opacity-50 transition-all duration-200"
-                  style={{ borderColor: `${hp.color}30` }}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-text-primary">{hp.name}</span>
-                    <div className="flex items-center gap-1.5">
-                      <div className={`w-2 h-2 rounded-full ${statusColors[hp.status]} ${hp.status === 'healthy' ? 'animate-pulse' : ''}`} />
-                      <span className="text-xs text-text-muted">{statusText[hp.status]}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-baseline justify-between">
-                    <span className="text-lg font-display font-bold" style={{ color: hp.color }}>
-                      {hp.events_1h}
-                    </span>
-                    <span className="text-xs text-text-muted">last 1h</span>
-                  </div>
-                  {hp.minutes_since_last !== null && hp.minutes_since_last < 60 && (
-                    <div className="text-xs text-text-muted mt-1">
-                      Last: {hp.minutes_since_last < 1 ? '<1' : Math.round(hp.minutes_since_last)}m ago
-                    </div>
-                  )}
-                </Link>
-              );
-            })
-          )}
         </div>
       </div>
 
@@ -343,9 +264,9 @@ export default function Dashboard() {
             View All Attackers <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
           {overviewLoading ? (
-            Array.from({ length: 6 }).map((_, i) => (
+            Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="bg-bg-card rounded-xl p-5 animate-pulse border border-bg-hover">
                 <div className="w-10 h-10 bg-bg-hover rounded-lg mb-3" />
                 <div className="h-4 bg-bg-hover rounded w-2/3 mb-2" />
@@ -353,7 +274,7 @@ export default function Dashboard() {
               </div>
             ))
           ) : (
-            overview?.honeypots?.map((hp) => {
+            overview?.honeypots?.filter(hp => hp.name !== 'firewall').map((hp) => {
               const Icon = HONEYPOT_ICONS[hp.name] || Shield;
               const color = HONEYPOT_COLORS[hp.name as HoneypotType];
               const name = HONEYPOT_NAMES[hp.name as HoneypotType] || hp.name;
@@ -410,6 +331,9 @@ export default function Dashboard() {
             <div className="flex items-center gap-2">
               <Activity className="w-5 h-5 text-neon-green" />
               <span className="font-display font-bold text-white">Attack Timeline</span>
+              <span className="text-xs text-text-muted px-2 py-0.5 bg-bg-hover rounded">
+                {timeRange === '1h' ? 'Last Hour' : timeRange === '24h' ? 'Last 24h' : timeRange === '7d' ? 'Last 7 Days' : 'Last 30 Days'}
+              </span>
             </div>
             <Link to="/attack-map" className="text-sm text-neon-blue hover:text-neon-green transition-colors flex items-center gap-1">
               Live Map <ArrowRight className="w-4 h-4" />
@@ -417,42 +341,53 @@ export default function Dashboard() {
           </div>
           <div className="p-4">
             {timelineLoading ? (
-              <div className="h-64 flex items-center justify-center">
+              <div className="h-72 flex items-center justify-center">
                 <LoadingSpinner />
               </div>
             ) : (
-              <div className="h-64">
+              <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={timeline?.data || []}>
+                  <AreaChart data={timeline?.data || []} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="timelineGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#39ff14" stopOpacity={0.4} />
+                        <stop offset="0%" stopColor="#39ff14" stopOpacity={0.5} />
+                        <stop offset="50%" stopColor="#39ff14" stopOpacity={0.2} />
                         <stop offset="100%" stopColor="#39ff14" stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <XAxis
                       dataKey="timestamp"
-                      tickFormatter={formatTime}
-                      stroke="#555"
-                      tick={{ fill: '#888', fontSize: 11 }}
-                      axisLine={false}
-                      tickLine={false}
+                      tickFormatter={formatTimelineAxis}
+                      stroke="#444"
+                      tick={{ fill: '#888', fontSize: 10 }}
+                      axisLine={{ stroke: '#333' }}
+                      tickLine={{ stroke: '#333' }}
+                      interval="preserveStartEnd"
+                      minTickGap={50}
                     />
                     <YAxis 
-                      stroke="#555" 
-                      tick={{ fill: '#888', fontSize: 11 }} 
-                      axisLine={false}
-                      tickLine={false}
+                      stroke="#444" 
+                      tick={{ fill: '#888', fontSize: 10 }} 
+                      axisLine={{ stroke: '#333' }}
+                      tickLine={{ stroke: '#333' }}
+                      tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(1)}k` : v}
+                      width={45}
                     />
                     <Tooltip
                       contentStyle={{
-                        backgroundColor: 'rgba(26, 26, 37, 0.95)',
-                        border: '1px solid rgba(255,255,255,0.1)',
+                        backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                        border: '1px solid rgba(57, 255, 20, 0.3)',
                         borderRadius: '12px',
-                        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                        boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                        padding: '12px 16px',
                       }}
-                      labelFormatter={formatTime}
-                      formatter={(value: number) => [value.toLocaleString(), 'Events']}
+                      labelStyle={{ color: '#fff', fontWeight: 'bold', marginBottom: '4px' }}
+                      itemStyle={{ color: '#39ff14' }}
+                      labelFormatter={formatTooltipLabel}
+                      formatter={(value: number) => [
+                        <span key="value" className="font-mono font-bold">{value.toLocaleString()} events</span>,
+                        null
+                      ]}
                     />
                     <Area
                       type="monotone"
@@ -460,6 +395,8 @@ export default function Dashboard() {
                       stroke="#39ff14"
                       fill="url(#timelineGradient)"
                       strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 6, fill: '#39ff14', stroke: '#000', strokeWidth: 2 }}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -475,13 +412,13 @@ export default function Dashboard() {
               <Globe className="w-5 h-5 text-neon-blue" />
               <span className="font-display font-bold text-white">Top Attack Origins</span>
             </div>
-            <Link to="/analytics" className="text-sm text-neon-blue hover:text-neon-green transition-colors flex items-center gap-1">
-              Analytics <ArrowRight className="w-4 h-4" />
+            <Link to="/attack-analysis" className="text-sm text-neon-blue hover:text-neon-green transition-colors flex items-center gap-1">
+              View All <ArrowRight className="w-4 h-4" />
             </Link>
           </div>
           <div className="p-4">
             {geoLoading ? (
-              <div className="h-64 flex items-center justify-center">
+              <div className="h-72 flex items-center justify-center">
                 <LoadingSpinner />
               </div>
             ) : (
@@ -495,7 +432,10 @@ export default function Dashboard() {
                     <div key={geo.country} className="group">
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2">
-                          <MapPin className="w-3 h-3 text-text-muted" />
+                          <span className="w-5 h-5 rounded flex items-center justify-center text-xs font-bold" 
+                            style={{ backgroundColor: `${colors[i % colors.length]}20`, color: colors[i % colors.length] }}>
+                            {i + 1}
+                          </span>
                           <span className="text-sm text-text-primary group-hover:text-white transition-colors">
                             {geo.country}
                           </span>
@@ -504,12 +444,13 @@ export default function Dashboard() {
                           {geo.count.toLocaleString()}
                         </span>
                       </div>
-                      <div className="h-1.5 bg-bg-hover rounded-full overflow-hidden">
+                      <div className="h-2 bg-bg-hover rounded-full overflow-hidden">
                         <div 
                           className="h-full rounded-full transition-all duration-500"
                           style={{ 
                             width: `${percentage}%`,
-                            backgroundColor: colors[i % colors.length],
+                            background: `linear-gradient(90deg, ${colors[i % colors.length]} 0%, ${colors[i % colors.length]}80 100%)`,
+                            boxShadow: `0 0 8px ${colors[i % colors.length]}40`,
                           }}
                         />
                       </div>
@@ -522,159 +463,156 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Bottom Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Top Attackers */}
-        <div className="bg-bg-card rounded-xl border border-bg-hover overflow-hidden">
-          <div className="flex items-center justify-between p-4 border-b border-bg-hover">
-            <div className="flex items-center gap-2">
-              <Skull className="w-5 h-5 text-neon-red" />
-              <span className="font-display font-bold text-white">Top Threat Actors</span>
-            </div>
+      {/* Attack Distribution - Improved */}
+      <div className="bg-bg-card rounded-xl border border-bg-hover overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-bg-hover">
+          <div className="flex items-center gap-2">
+            <Target className="w-5 h-5 text-neon-purple" />
+            <span className="font-display font-bold text-white">Attack Distribution by Honeypot</span>
           </div>
-          <div className="divide-y divide-bg-hover">
-            {attackersLoading ? (
-              <div className="p-8 flex items-center justify-center">
-                <LoadingSpinner />
+          <div className="flex items-center gap-2 text-xs text-text-muted">
+            <Zap className="w-4 h-4" />
+            <span>{honeypotDistributionData.length} Active Honeypots</span>
+          </div>
+        </div>
+        <div className="p-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* Left: Donut Chart with center stats */}
+            <div className="relative">
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={honeypotDistributionData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={70}
+                      outerRadius={120}
+                      paddingAngle={3}
+                      dataKey="value"
+                      animationBegin={0}
+                      animationDuration={800}
+                      stroke="rgba(0,0,0,0.5)"
+                      strokeWidth={2}
+                    >
+                      {honeypotDistributionData.map((entry, index) => (
+                        <Cell 
+                          key={`cell-${index}`} 
+                          fill={entry.color}
+                          style={{
+                            filter: `drop-shadow(0 0 8px ${entry.color}40)`,
+                          }}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        borderRadius: '12px',
+                        boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                        padding: '12px 16px',
+                      }}
+                      formatter={(value: number, _name: string, props: any) => {
+                        return [
+                          <div key="content" className="text-white">
+                            <div className="font-bold text-lg">{value.toLocaleString()}</div>
+                            <div className="text-text-muted text-xs">{props.payload.percentage}% of total</div>
+                            <div className="text-text-muted text-xs mt-1">{props.payload.uniqueIPs} unique IPs</div>
+                          </div>,
+                          null
+                        ];
+                      }}
+                      labelFormatter={(name) => <span className="font-bold">{name}</span>}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
-            ) : (
-              topAttackers?.data?.slice(0, 5).map((attacker, i) => {
-                // Behavior classification styling
-                const behaviorStyles: Record<string, { color: string; bg: string; icon: string }> = {
-                  Script: { color: 'text-neon-red', bg: 'bg-neon-red/20', icon: '⚡' },
-                  Human: { color: 'text-neon-green', bg: 'bg-neon-green/20', icon: '👤' },
-                  Bot: { color: 'text-neon-orange', bg: 'bg-neon-orange/20', icon: '🤖' },
-                };
-                const behavior = attacker.behavior_classification;
-                const style = behavior ? behaviorStyles[behavior] : null;
-                
-                // Format duration
-                const formatDuration = (seconds?: number) => {
-                  if (!seconds) return null;
-                  if (seconds < 60) return `${Math.round(seconds)}s`;
-                  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-                  return `${(seconds / 3600).toFixed(1)}h`;
-                };
-                
-                return (
-                  <div key={attacker.ip} className="flex items-center justify-between p-4 hover:bg-bg-hover/50 transition-colors">
-                    <div className="flex items-center gap-4">
-                      <div className="w-8 h-8 rounded-lg bg-neon-red/20 flex items-center justify-center text-neon-red font-bold text-sm">
-                        {i + 1}
-                      </div>
-                      <div>
-                        <IPLink ip={attacker.ip} />
-                        <div className="text-xs text-text-muted flex items-center gap-2 mt-0.5">
-                          <span className="flex items-center gap-1">
-                            <MapPin className="w-3 h-3" />
-                            {attacker.country || 'Unknown'}
-                          </span>
-                          {attacker.total_duration_seconds && (
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {formatDuration(attacker.total_duration_seconds)}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      {style && behavior && (
-                        <div className={`px-2 py-1 rounded-lg text-xs font-medium ${style.bg} ${style.color} flex items-center gap-1`}>
-                          <span>{style.icon}</span>
-                          <span>{behavior}</span>
-                        </div>
-                      )}
-                      <div className="text-right">
-                        <div className="font-mono text-neon-green font-bold">
-                          {attacker.count.toLocaleString()}
-                        </div>
-                        <div className="text-xs text-text-muted">events</div>
-                      </div>
-                    </div>
+              {/* Center stats */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="text-center">
+                  <div className="text-3xl font-display font-bold text-white">
+                    {overview?.total_events?.toLocaleString() || 0}
                   </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        {/* Attack Velocity Chart */}
-        <div className="bg-bg-card rounded-xl border border-bg-hover overflow-hidden">
-          <div className="flex items-center justify-between p-4 border-b border-bg-hover">
-            <div className="flex items-center gap-2">
-              <Zap className="w-5 h-5 text-neon-orange" />
-              <span className="font-display font-bold text-white">Attack Velocity</span>
+                  <div className="text-xs text-text-muted uppercase tracking-wider">Total Events</div>
+                </div>
+              </div>
             </div>
-            <span className="text-xs text-text-muted">Last hour</span>
-          </div>
-          <div className="p-4">
-            <div className="h-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={velocity?.velocity?.slice(-20) || []}>
-                  <XAxis 
-                    dataKey="timestamp"
-                    tickFormatter={(ts) => new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-                    stroke="#555"
-                    tick={{ fill: '#888', fontSize: 10 }}
-                    axisLine={false}
-                    tickLine={false}
-                    interval="preserveStartEnd"
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: 'rgba(26, 26, 37, 0.95)',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                      borderRadius: '12px',
-                    }}
-                    labelFormatter={(ts) => new Date(ts).toLocaleTimeString()}
-                    formatter={(value: number) => [value, 'Events']}
-                  />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                    {velocity?.velocity?.slice(-20).map((_, i) => (
-                      <Cell 
-                        key={i}
-                        fill={i === (velocity?.velocity?.length || 0) - 21 + 20 ? '#39ff14' : '#00d4ff'}
-                        fillOpacity={0.3 + (i / 20) * 0.7}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+
+            {/* Right: Bar Chart + Stats */}
+            <div className="flex flex-col gap-6">
+              {/* Bar chart */}
+              <div className="h-48">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={honeypotDistributionData} layout="vertical" margin={{ left: 0, right: 20 }}>
+                    <XAxis type="number" hide />
+                    <YAxis 
+                      type="category" 
+                      dataKey="shortName" 
+                      tick={{ fill: '#888', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={50}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                        border: '1px solid rgba(255,255,255,0.2)',
+                        borderRadius: '8px',
+                        padding: '8px 12px',
+                      }}
+                      formatter={(value: number) => [value.toLocaleString(), 'Events']}
+                      labelFormatter={(label) => honeypotDistributionData.find(d => d.shortName === label)?.name || label}
+                    />
+                    <Bar 
+                      dataKey="value" 
+                      radius={[0, 4, 4, 0]}
+                    >
+                      {honeypotDistributionData.map((entry, index) => (
+                        <Cell 
+                          key={`bar-${index}`} 
+                          fill={entry.color}
+                          style={{ filter: `drop-shadow(0 0 4px ${entry.color}60)` }}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Legend with stats */}
+              <div className="grid grid-cols-2 gap-3">
+                {honeypotDistributionData.map(item => (
+                  <Link 
+                    key={item.name} 
+                    to={`/${item.name.toLowerCase().replace(/[^a-z]/g, '')}`}
+                    className="flex items-center gap-3 p-3 rounded-lg bg-bg-hover/50 hover:bg-bg-hover transition-all group border border-transparent hover:border-opacity-30"
+                    style={{ '--hover-border': item.color } as any}
+                  >
+                    <div 
+                      className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-110"
+                      style={{ backgroundColor: `${item.color}20` }}
+                    >
+                      <span className="text-lg font-bold" style={{ color: item.color }}>
+                        {item.percentage}%
+                      </span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-text-primary truncate group-hover:text-white transition-colors">
+                        {item.name}
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-text-muted">
+                        <span>{item.value.toLocaleString()} events</span>
+                        <span>•</span>
+                        <span>{item.uniqueIPs} IPs</span>
+                      </div>
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </Link>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Quick Stat Component
-function QuickStat({ 
-  icon, 
-  label, 
-  value, 
-  color 
-}: { 
-  icon: React.ReactNode; 
-  label: string; 
-  value: string | number; 
-  color: 'green' | 'blue' | 'orange' | 'red';
-}) {
-  const colorClasses = {
-    green: 'text-neon-green bg-neon-green/10 border-neon-green/20',
-    blue: 'text-neon-blue bg-neon-blue/10 border-neon-blue/20',
-    orange: 'text-neon-orange bg-neon-orange/10 border-neon-orange/20',
-    red: 'text-neon-red bg-neon-red/10 border-neon-red/20',
-  };
-
-  return (
-    <div className={`flex items-center gap-3 p-3 rounded-xl border ${colorClasses[color]}`}>
-      <div className={colorClasses[color].split(' ')[0]}>{icon}</div>
-      <div>
-        <div className="text-xs text-text-muted">{label}</div>
-        <div className={`text-lg font-display font-bold ${colorClasses[color].split(' ')[0]}`}>
-          {typeof value === 'number' ? value.toLocaleString() : value}
         </div>
       </div>
     </div>

@@ -226,47 +226,65 @@ async def poll_new_events(poll_seconds: int = 10) -> List[dict]:
 
 
 async def get_current_stats() -> dict:
-    """Get current attack map statistics."""
+    """Get current attack map statistics using 24h time range for better visibility."""
     es = get_es_service()
     if not es:
-        return {"total_attacks": 0, "unique_ips": 0, "countries": 0}
+        return {"total_attacks": 0, "unique_ips": 0, "countries": 0, "country_breakdown": {}}
     
     total_attacks = 0
-    countries = set()
+    country_counts: dict[str, int] = {}
+    unique_ips_set: set = set()
     
     for honeypot, index_pattern in INDEX_PATTERNS.items():
         try:
-            # Determine IP and country fields (use .keyword for text fields)
+            # Build aggregations based on honeypot type
             if honeypot == "cowrie":
-                ip_field = "json.src_ip"
-                country_field = "source.geo.country_name"
+                # Cowrie uses cowrie.geo.country_name and cowrie.src_ip
+                result = await es.search(
+                    index=index_pattern,
+                    query=es._get_time_range_query("24h"),
+                    size=0,
+                    aggs={
+                        "total": {"value_count": {"field": "@timestamp"}},
+                        "countries": {"terms": {"field": "cowrie.geo.country_name", "size": 100}},
+                        "unique_ips": {"cardinality": {"field": "cowrie.src_ip"}}
+                    }
+                )
             else:
-                ip_field = "source.ip"
-                country_field = "source.geo.country_name.keyword"
-            
-            result = await es.search(
-                index=index_pattern,
-                query=es._get_time_range_query("1h"),
-                size=0,
-                aggs={
-                    "total": {"value_count": {"field": "@timestamp"}},
-                    "countries": {"terms": {"field": country_field, "size": 100}}
-                }
-            )
+                # Other honeypots use source.geo.country_name.keyword and source.ip
+                result = await es.search(
+                    index=index_pattern,
+                    query=es._get_time_range_query("24h"),
+                    size=0,
+                    aggs={
+                        "total": {"value_count": {"field": "@timestamp"}},
+                        "countries": {"terms": {"field": "source.geo.country_name.keyword", "size": 100}},
+                        "unique_ips": {"cardinality": {"field": "source.ip"}}
+                    }
+                )
             
             aggs = result.get("aggregations", {})
             total_attacks += aggs.get("total", {}).get("value", 0)
             
+            # Add unique IPs count
+            ip_count = aggs.get("unique_ips", {}).get("value", 0)
+            
             for bucket in aggs.get("countries", {}).get("buckets", []):
-                if bucket["key"]:
-                    countries.add(bucket["key"])
-        except Exception:
-            pass
+                country = bucket.get("key")
+                count = bucket.get("doc_count", 0)
+                if country:
+                    country_counts[country] = country_counts.get(country, 0) + count
+        except Exception as e:
+            logger.debug("attackmap_stats_error", honeypot=honeypot, error=str(e))
+    
+    # Calculate approximate unique IPs from totals
+    estimated_unique_ips = len(country_counts) * 5 if country_counts else 0  # Rough estimate
     
     return {
         "total_attacks": total_attacks,
-        "unique_ips": total_attacks // 3,  # Rough estimate
-        "countries": len(countries)
+        "unique_ips": estimated_unique_ips,
+        "countries": len(country_counts),
+        "country_breakdown": country_counts
     }
 
 
@@ -331,22 +349,89 @@ async def attackmap_websocket(websocket: WebSocket):
         attack_map_manager.disconnect(websocket)
 
 
-@router.get("/recent")
-async def get_recent_attacks(
-    limit: int = Query(default=50, ge=1, le=200),
+@router.get("/historical")
+async def get_historical_attacks(
+    limit: int = Query(default=100, ge=1, le=500),
     _: str = Depends(get_current_user)
 ):
-    """Get recent attacks for initial map population."""
+    """Get historical attacks from the last 24 hours for initial map population."""
     es = get_es_service()
     events = []
     
-    per_index_limit = (limit // len(INDEX_PATTERNS)) + 5
+    per_index_limit = (limit // len(INDEX_PATTERNS)) + 10
     
     for honeypot, index_pattern in INDEX_PATTERNS.items():
         try:
             result = await es.search(
                 index=index_pattern,
-                query=es._get_time_range_query("1h"),
+                query=es._get_time_range_query("24h"),
+                size=per_index_limit,
+                sort=[{"@timestamp": "desc"}]
+            )
+            
+            for hit in result.get("hits", {}).get("hits", []):
+                source = hit["_source"]
+                data = extract_event_data(source, honeypot)
+                
+                # Skip internal IPs
+                if is_internal_ip(data["src_ip"]):
+                    continue
+                
+                # Skip events without valid geo data
+                if not data["src_lat"] or not data["src_lon"]:
+                    continue
+                
+                events.append({
+                    "id": hit["_id"],
+                    "timestamp": source.get("@timestamp", ""),
+                    "honeypot": honeypot,
+                    "src_ip": data["src_ip"] or "unknown",
+                    "src_lat": data["src_lat"],
+                    "src_lon": data["src_lon"],
+                    "src_country": data["src_country"],
+                    "dst_lat": 47.3769,
+                    "dst_lon": 8.5417,
+                    "port": data["dst_port"] or DEFAULT_PORTS.get(honeypot)
+                })
+        except Exception as e:
+            logger.debug("attackmap_historical_error", honeypot=honeypot, error=str(e))
+    
+    # Sort by timestamp and limit
+    events.sort(key=lambda x: x["timestamp"], reverse=True)
+    return events[:limit]
+
+
+@router.get("/recent")
+async def get_recent_attacks(
+    limit: int = Query(default=50, ge=1, le=200),
+    seconds: int = Query(default=60, ge=5, le=3600),
+    _: str = Depends(get_current_user)
+):
+    """Get recent attacks from the last N seconds for live map updates."""
+    es = get_es_service()
+    events = []
+    
+    per_index_limit = (limit // len(INDEX_PATTERNS)) + 5
+    
+    # Only get events from the last N seconds (not old logs)
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    since = now - timedelta(seconds=seconds)
+    
+    time_query = {
+        "range": {
+            "@timestamp": {
+                "gte": since.isoformat() + "Z",
+                "lte": now.isoformat() + "Z"
+            }
+        }
+    }
+    
+    for honeypot, index_pattern in INDEX_PATTERNS.items():
+        try:
+            result = await es.search(
+                index=index_pattern,
+                query=time_query,
                 size=per_index_limit,
                 sort=[{"@timestamp": "desc"}]
             )
@@ -387,3 +472,50 @@ async def get_recent_attacks(
 async def get_attackmap_stats(_: str = Depends(get_current_user)):
     """Get current attack map statistics."""
     return await get_current_stats()
+
+
+@router.get("/top-countries")
+async def get_top_countries(
+    limit: int = Query(default=10, ge=1, le=50),
+    _: str = Depends(get_current_user)
+):
+    """Get top source countries for honeypot attacks."""
+    es = get_es_service()
+    if not es:
+        return {"countries": []}
+    
+    country_counts: dict[str, int] = {}
+    
+    for honeypot, index_pattern in INDEX_PATTERNS.items():
+        try:
+            if honeypot == "cowrie":
+                country_field = "cowrie.geo.country_name"
+            else:
+                country_field = "source.geo.country_name.keyword"
+            
+            result = await es.search(
+                index=index_pattern,
+                query=es._get_time_range_query("24h"),
+                size=0,
+                aggs={
+                    "countries": {"terms": {"field": country_field, "size": 100}}
+                }
+            )
+            
+            for bucket in result.get("aggregations", {}).get("countries", {}).get("buckets", []):
+                country = bucket.get("key")
+                count = bucket.get("doc_count", 0)
+                if country:
+                    country_counts[country] = country_counts.get(country, 0) + count
+        except Exception as e:
+            logger.debug("attackmap_countries_error", honeypot=honeypot, error=str(e))
+    
+    # Sort by count and return top N
+    sorted_countries = sorted(country_counts.items(), key=lambda x: -x[1])[:limit]
+    
+    return {
+        "countries": [
+            {"country": country, "count": count}
+            for country, count in sorted_countries
+        ]
+    }

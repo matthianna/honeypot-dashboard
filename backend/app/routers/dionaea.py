@@ -21,23 +21,63 @@ from app.models.schemas import (
 router = APIRouter()
 INDEX = "dionaea-*"
 
+# All ports exposed by Dionaea honeypot configuration
+DIONAEA_EXPOSED_PORTS = {
+    21: {"name": "FTP", "protocol": "tcp"},
+    42: {"name": "WINS", "protocol": "tcp"},
+    69: {"name": "TFTP", "protocol": "udp"},
+    80: {"name": "HTTP", "protocol": "tcp"},
+    135: {"name": "MSRPC", "protocol": "tcp"},
+    443: {"name": "HTTPS", "protocol": "tcp"},
+    445: {"name": "SMB", "protocol": "tcp"},
+    1433: {"name": "MSSQL", "protocol": "tcp"},
+    1723: {"name": "PPTP", "protocol": "tcp"},
+    1883: {"name": "MQTT", "protocol": "tcp"},
+    1900: {"name": "SSDP", "protocol": "udp"},
+    3306: {"name": "MySQL", "protocol": "tcp"},
+    5060: {"name": "SIP", "protocol": "tcp"},
+    5060: {"name": "SIP", "protocol": "udp"},  # Note: same port, different protocol
+    5061: {"name": "SIPS", "protocol": "tcp"},
+    11211: {"name": "Memcached", "protocol": "tcp"},
+}
+# Unique port numbers for counting
+DIONAEA_EXPOSED_PORT_NUMBERS = [21, 42, 69, 80, 135, 443, 445, 1433, 1723, 1883, 1900, 3306, 5060, 5061, 11211]
 
-@router.get("/stats", response_model=StatsResponse)
+
+@router.get("/stats")
 async def get_dionaea_stats(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get Dionaea honeypot statistics."""
+    """Get Dionaea honeypot statistics including port counts."""
     es = get_es_service()
     
     total_events = await es.get_total_events(INDEX, time_range)
     unique_ips = await es.get_unique_ips(INDEX, time_range)
     
-    return StatsResponse(
-        total_events=total_events,
-        unique_ips=unique_ips,
-        time_range=time_range
+    # Get attacked port count (ports that received traffic)
+    result = await es.search(
+        index=INDEX,
+        query=es.build_dionaea_query(time_range),
+        size=0,
+        aggs={
+            "attacked_ports": {
+                "cardinality": {
+                    "field": "destination.port"
+                }
+            }
+        }
     )
+    attacked_ports = result.get("aggregations", {}).get("attacked_ports", {}).get("value", 0)
+    
+    return {
+        "total_events": total_events,
+        "unique_ips": unique_ips,
+        "exposed_ports": len(DIONAEA_EXPOSED_PORT_NUMBERS),  # 15 unique port numbers
+        "attacked_ports": attacked_ports,  # Ports that received attacks
+        "unique_ports": len(DIONAEA_EXPOSED_PORT_NUMBERS),  # Keep for compatibility
+        "time_range": time_range
+    }
 
 
 @router.get("/timeline", response_model=TimelineResponse)
@@ -108,9 +148,10 @@ async def get_dionaea_protocols(
     """Get protocol distribution for Dionaea."""
     es = get_es_service()
     
+    # Use filtered query to exclude noise and internal IPs
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=es.build_dionaea_query(time_range),
         size=0,
         aggs={
             "protocols": {
@@ -136,27 +177,24 @@ async def get_dionaea_protocols(
 async def get_dionaea_ports(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     limit: int = Query(default=20, ge=1, le=100),
+    include_all: bool = Query(default=True, description="Include all exposed ports even if not attacked"),
     _: str = Depends(get_current_user)
 ):
-    """Get port distribution for Dionaea."""
+    """Get port distribution for Dionaea including all exposed ports."""
     es = get_es_service()
     
+    # Use filtered query to exclude noise and internal IPs
     result = await es.search(
         index=INDEX,
-        query={
-            "bool": {
-                "must": [
-                    es._get_time_range_query(time_range),
-                    {"exists": {"field": "destination.port"}}
-                ]
-            }
-        },
+        query=es.build_dionaea_query(time_range, additional_must=[
+            {"exists": {"field": "destination.port"}}
+        ]),
         size=0,
         aggs={
             "ports": {
                 "terms": {
                     "field": "destination.port",
-                    "size": limit
+                    "size": 100  # Get all attacked ports
                 },
                 "aggs": {
                     "protocol": {
@@ -170,17 +208,160 @@ async def get_dionaea_ports(
         }
     )
     
-    ports = []
+    # Build map of attacked ports
+    attacked_ports = {}
     for bucket in result.get("aggregations", {}).get("ports", {}).get("buckets", []):
         hit = bucket["protocol"]["hits"]["hits"][0]["_source"] if bucket["protocol"]["hits"]["hits"] else {}
-        
-        ports.append(DionaeaPortStats(
-            port=bucket["key"],
-            count=bucket["doc_count"],
-            protocol=hit.get("network", {}).get("transport")
-        ))
+        attacked_ports[bucket["key"]] = {
+            "count": bucket["doc_count"],
+            "protocol": hit.get("network", {}).get("transport")
+        }
     
-    return ports
+    ports = []
+    
+    if include_all:
+        # Include all configured ports, with attack counts (0 if not attacked)
+        for port_num in DIONAEA_EXPOSED_PORT_NUMBERS:
+            port_info = DIONAEA_EXPOSED_PORTS.get(port_num, {"name": f"Port {port_num}", "protocol": "tcp"})
+            attack_data = attacked_ports.get(port_num, {"count": 0, "protocol": port_info["protocol"]})
+            ports.append(DionaeaPortStats(
+                port=port_num,
+                count=attack_data["count"],
+                protocol=attack_data.get("protocol") or port_info["protocol"]
+            ))
+        # Sort by count descending, then by port number
+        ports.sort(key=lambda x: (-x.count, x.port))
+    else:
+        # Only return attacked ports (original behavior)
+        for bucket in result.get("aggregations", {}).get("ports", {}).get("buckets", []):
+            hit = bucket["protocol"]["hits"]["hits"][0]["_source"] if bucket["protocol"]["hits"]["hits"] else {}
+            ports.append(DionaeaPortStats(
+                port=bucket["key"],
+                count=bucket["doc_count"],
+                protocol=hit.get("network", {}).get("transport")
+            ))
+    
+    return ports[:limit]
+
+
+@router.get("/port-timeline")
+async def get_dionaea_port_timeline(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get timeline data broken down by port.
+    Shows events over time for each targeted port.
+    """
+    es = get_es_service()
+    
+    # Determine interval based on time range
+    intervals = {
+        "1h": "5m",
+        "24h": "1h",
+        "7d": "6h",
+        "30d": "1d",
+    }
+    interval = intervals.get(time_range, "1h")
+    
+    # Get top ports first
+    top_ports_result = await es.search(
+        index=INDEX,
+        query=es.build_dionaea_query(time_range, additional_must=[
+            {"exists": {"field": "destination.port"}}
+        ]),
+        size=0,
+        aggs={
+            "ports": {
+                "terms": {
+                    "field": "destination.port",
+                    "size": 10  # Top 10 ports
+                }
+            }
+        }
+    )
+    
+    top_ports = [bucket["key"] for bucket in top_ports_result.get("aggregations", {}).get("ports", {}).get("buckets", [])]
+    
+    # Get timeline for each port
+    result = await es.search(
+        index=INDEX,
+        query=es.build_dionaea_query(time_range, additional_must=[
+            {"exists": {"field": "destination.port"}}
+        ]),
+        size=0,
+        aggs={
+            "timeline": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": interval
+                },
+                "aggs": {
+                    "by_port": {
+                        "terms": {
+                            "field": "destination.port",
+                            "size": 10
+                        }
+                    }
+                }
+            }
+        }
+    )
+    
+    # Port name mappings
+    port_names = {
+        21: "FTP",
+        22: "SSH",
+        23: "Telnet",
+        25: "SMTP",
+        80: "HTTP",
+        110: "POP3",
+        135: "MSRPC",
+        139: "NetBIOS",
+        443: "HTTPS",
+        445: "SMB",
+        1433: "MSSQL",
+        1521: "Oracle",
+        3306: "MySQL",
+        3389: "RDP",
+        5060: "SIP",
+        5432: "PostgreSQL",
+        5900: "VNC",
+        6379: "Redis",
+        8080: "HTTP-Alt",
+        27017: "MongoDB",
+    }
+    
+    # Build timeline data
+    timeline = []
+    for bucket in result.get("aggregations", {}).get("timeline", {}).get("buckets", []):
+        entry = {
+            "timestamp": bucket["key_as_string"],
+            "total": bucket["doc_count"]
+        }
+        
+        # Add counts per port
+        for port_bucket in bucket.get("by_port", {}).get("buckets", []):
+            port = port_bucket["key"]
+            port_label = port_names.get(port, f"Port {port}")
+            entry[port_label] = port_bucket["doc_count"]
+        
+        timeline.append(entry)
+    
+    # Build port info with labels
+    ports_info = []
+    for port in top_ports:
+        ports_info.append({
+            "port": port,
+            "label": port_names.get(port, f"Port {port}")
+        })
+    
+    return {
+        "time_range": time_range,
+        "interval": interval,
+        "timeline": timeline,
+        "ports": ports_info
+    }
 
 
 @router.get("/connections")
@@ -192,17 +373,12 @@ async def get_dionaea_connections(
     """Get Dionaea connection events with details."""
     es = get_es_service()
     
+    # Use filtered query to exclude noise and internal IPs
     result = await es.search(
         index=INDEX,
-        query={
-            "bool": {
-                "must": [
-                    es._get_time_range_query(time_range),
-                    {"exists": {"field": "source.ip"}},
-                    {"term": {"dionaea.component": "connection"}}
-                ]
-            }
-        },
+        query=es.build_dionaea_query(time_range, additional_must=[
+            {"term": {"dionaea.component": "connection"}}
+        ]),
         size=limit,
         sort=[{"@timestamp": "desc"}]
     )
@@ -242,22 +418,20 @@ async def get_dionaea_malware(
     """Get malware samples captured by Dionaea."""
     es = get_es_service()
     
-    # Look for file download events
+    # Look for file download events - use filtered query base
+    base_query = es.build_dionaea_query(time_range)
+    
+    # Add should clauses for malware detection
+    base_query["bool"]["should"] = [
+        {"exists": {"field": "file.hash.md5"}},
+        {"exists": {"field": "file.hash.sha256"}},
+        {"match": {"dionaea.msg": "download"}}
+    ]
+    base_query["bool"]["minimum_should_match"] = 1
+    
     result = await es.search(
         index=INDEX,
-        query={
-            "bool": {
-                "must": [
-                    es._get_time_range_query(time_range)
-                ],
-                "should": [
-                    {"exists": {"field": "file.hash.md5"}},
-                    {"exists": {"field": "file.hash.sha256"}},
-                    {"match": {"dionaea.msg": "download"}}
-                ],
-                "minimum_should_match": 1
-            }
-        },
+        query=base_query,
         size=limit,
         sort=[{"@timestamp": "desc"}]
     )
@@ -293,16 +467,42 @@ async def get_dionaea_logs(
     search: Optional[str] = Query(default=None),
     _: str = Depends(get_current_user)
 ):
-    """Get Dionaea logs with filtering options."""
+    """Get Dionaea logs with filtering options (excludes debug noise)."""
     es = get_es_service()
     
-    filters = {}
+    # Build additional must clauses
+    additional_must = []
     if component:
-        filters["dionaea.component"] = component
+        additional_must.append({"term": {"dionaea.component.keyword": component}})
     if src_ip:
-        filters["source.ip"] = src_ip
+        additional_must.append({"term": {"source.ip": src_ip}})
+    if search:
+        additional_must.append({"wildcard": {"message": f"*{search}*"}})
     
-    return await es.get_logs(INDEX, time_range, limit, search, filters)
+    # Use build_dionaea_query which includes noise exclusion
+    query = es.build_dionaea_query(time_range, additional_must=additional_must if additional_must else None)
+    
+    result = await es.search(
+        index=INDEX,
+        query=query,
+        size=limit,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    logs = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        logs.append({
+            "timestamp": source.get("@timestamp"),
+            "message": source.get("message"),
+            "src_ip": source.get("source", {}).get("ip"),
+            "country": source.get("source", {}).get("geo", {}).get("country_name"),
+            "component": source.get("dionaea", {}).get("component"),
+            "service": source.get("dionaea", {}).get("service"),
+            "port": source.get("destination", {}).get("port"),
+        })
+    
+    return {"total": result.get("hits", {}).get("total", {}).get("value", 0), "logs": logs}
 
 
 @router.get("/heatmap")
@@ -335,13 +535,12 @@ async def get_dionaea_service_distribution(
         5900: "VNC", 6379: "Redis", 8080: "HTTP-ALT", 27017: "MongoDB"
     }
     
+    # Use filtered query to exclude noise
     result = await es.search(
         index=INDEX,
-        query={"bool": {"must": [
-            es._get_time_range_query(time_range),
-            {"exists": {"field": "source.ip"}},
+        query=es.build_dionaea_query(time_range, additional_must=[
             {"term": {"dionaea.component.keyword": "connection"}}
-        ]}},
+        ]),
         size=0,
         aggs={
             "by_port": {
@@ -374,9 +573,10 @@ async def get_dionaea_connection_states(
     """Get connection state distribution and lifecycle analysis."""
     es = get_es_service()
     
+    # Use filtered query to exclude noise
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=es.build_dionaea_query(time_range),
         size=0,
         aggs={
             "by_component": {
@@ -418,13 +618,12 @@ async def get_dionaea_attack_sources(
         445: "SMB", 1433: "MSSQL", 3306: "MySQL", 5060: "SIP", 1900: "UPnP"
     }
     
+    # Use filtered query to exclude noise
     result = await es.search(
         index=INDEX,
-        query={"bool": {"must": [
-            es._get_time_range_query(time_range),
-            {"exists": {"field": "source.ip"}},
+        query=es.build_dionaea_query(time_range, additional_must=[
             {"term": {"dionaea.component.keyword": "connection"}}
-        ]}},
+        ]),
         size=0,
         aggs={
             "by_port": {
@@ -472,12 +671,10 @@ async def get_dionaea_hourly_breakdown(
         1433: "MSSQL", 3306: "MySQL", 5060: "SIP", 1900: "UPnP"
     }
     
+    # Use filtered query to exclude noise
     result = await es.search(
         index=INDEX,
-        query={"bool": {"must": [
-            es._get_time_range_query(time_range),
-            {"exists": {"field": "source.ip"}}
-        ]}},
+        query=es.build_dionaea_query(time_range),
         size=0,
         aggs={
             "by_hour": {
@@ -520,13 +717,12 @@ async def get_dionaea_malware_analysis(
     """
     es = get_es_service()
     
-    # Search for HTTP requests that look like malware downloads
+    # Search for HTTP requests that look like malware downloads - use filtered query
     result = await es.search(
         index=INDEX,
-        query={"bool": {"must": [
-            es._get_time_range_query(time_range),
+        query=es.build_dionaea_query(time_range, additional_must=[
             {"term": {"dionaea.component.keyword": "http"}}
-        ]}},
+        ]),
         size=500,
         sort=[{"@timestamp": "desc"}]
     )
@@ -575,10 +771,10 @@ async def get_dionaea_malware_analysis(
         else:
             categories["other"].append(entry)
     
-    # Get component breakdown
+    # Get component breakdown - use filtered query
     component_result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query=es.build_dionaea_query(time_range),
         size=0,
         aggs={
             "by_component": {
@@ -628,17 +824,15 @@ async def get_dionaea_all_connections(
         5900: "VNC", 6379: "Redis", 8080: "HTTP-ALT", 27017: "MongoDB"
     }
     
-    must_clauses = [
-        es._get_time_range_query(time_range),
-        {"exists": {"field": "source.ip"}}
-    ]
-    
+    # Build additional must clauses
+    additional_must = []
     if port:
-        must_clauses.append({"term": {"destination.port": port}})
+        additional_must.append({"term": {"destination.port": port}})
     if src_ip:
-        must_clauses.append({"term": {"source.ip": src_ip}})
+        additional_must.append({"term": {"source.ip": src_ip}})
     
-    query = {"bool": {"must": must_clauses}}
+    # Use filtered query to exclude noise
+    query = es.build_dionaea_query(time_range, additional_must=additional_must if additional_must else None)
     
     result = await es.search(
         index=INDEX,

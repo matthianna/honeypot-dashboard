@@ -28,12 +28,22 @@ INDEX = ".ds-cowrie-*"
 async def get_duration_stats(es, time_range: str, variant_filter: Optional[str] = None) -> Dict[str, Any]:
     """
     Calculate duration statistics by fetching raw duration values from session.closed events.
-    The json.duration field is stored as a string, so we need to parse and calculate in Python.
+    Supports both old (json.*) and new (cowrie.*) field structures.
+    Duration can be in json.duration, cowrie.duration, or cowrie.duration_seconds.
     """
     must_clauses = [
         es._get_time_range_query(time_range),
-        {"term": {"json.eventid": "cowrie.session.closed"}},
-        {"exists": {"field": "json.duration"}}
+        # Support both old (json.eventid) and new (cowrie.eventid) field structures
+        {"bool": {"should": [
+            {"term": {"json.eventid": "cowrie.session.closed"}},
+            {"term": {"cowrie.eventid": "cowrie.session.closed"}}
+        ], "minimum_should_match": 1}},
+        # Duration can be in multiple fields
+        {"bool": {"should": [
+            {"exists": {"field": "json.duration"}},
+            {"exists": {"field": "cowrie.duration"}},
+            {"exists": {"field": "cowrie.duration_seconds"}}
+        ], "minimum_should_match": 1}}
     ]
     
     if variant_filter:
@@ -43,15 +53,21 @@ async def get_duration_stats(es, time_range: str, variant_filter: Optional[str] 
         index=INDEX,
         query={"bool": {"must": must_clauses}},
         size=10000,  # Get enough samples for accurate stats
-        fields=["json.duration"]
+        fields=["json.duration", "cowrie.duration", "cowrie.duration_seconds"]
     )
     
     durations = []
     for hit in result.get("hits", {}).get("hits", []):
         try:
-            duration_str = hit["_source"].get("json", {}).get("duration")
-            if duration_str:
-                durations.append(float(duration_str))
+            source = hit["_source"]
+            # Try multiple field locations
+            duration_val = (
+                source.get("json", {}).get("duration") or
+                source.get("cowrie", {}).get("duration") or
+                source.get("cowrie", {}).get("duration_seconds")
+            )
+            if duration_val is not None:
+                durations.append(float(duration_val))
         except (ValueError, TypeError):
             pass
     
@@ -127,11 +143,21 @@ async def get_duration_distribution(es, time_range: str, variant_filter: Optiona
     """
     Calculate duration distribution histogram by fetching raw values.
     Returns buckets of durations grouped by interval (default 10 seconds).
+    Supports both old (json.*) and new (cowrie.*) field structures.
     """
     must_clauses = [
         es._get_time_range_query(time_range),
-        {"term": {"json.eventid": "cowrie.session.closed"}},
-        {"exists": {"field": "json.duration"}}
+        # Support both old (json.eventid) and new (cowrie.eventid) field structures
+        {"bool": {"should": [
+            {"term": {"json.eventid": "cowrie.session.closed"}},
+            {"term": {"cowrie.eventid": "cowrie.session.closed"}}
+        ], "minimum_should_match": 1}},
+        # Duration can be in multiple fields
+        {"bool": {"should": [
+            {"exists": {"field": "json.duration"}},
+            {"exists": {"field": "cowrie.duration"}},
+            {"exists": {"field": "cowrie.duration_seconds"}}
+        ], "minimum_should_match": 1}}
     ]
     
     if variant_filter:
@@ -141,16 +167,22 @@ async def get_duration_distribution(es, time_range: str, variant_filter: Optiona
         index=INDEX,
         query={"bool": {"must": must_clauses}},
         size=10000,
-        fields=["json.duration"]
+        fields=["json.duration", "cowrie.duration", "cowrie.duration_seconds"]
     )
     
     # Collect durations
     durations = []
     for hit in result.get("hits", {}).get("hits", []):
         try:
-            duration_str = hit["_source"].get("json", {}).get("duration")
-            if duration_str:
-                durations.append(float(duration_str))
+            source = hit["_source"]
+            # Try multiple field locations
+            duration_val = (
+                source.get("json", {}).get("duration") or
+                source.get("cowrie", {}).get("duration") or
+                source.get("cowrie", {}).get("duration_seconds")
+            )
+            if duration_val is not None:
+                durations.append(float(duration_val))
         except (ValueError, TypeError):
             pass
     
@@ -260,17 +292,124 @@ async def get_cowrie_sessions(
     """Get Cowrie sessions with duration and command count. Supports filtering by duration, variant, and command presence."""
     es = get_es_service()
     
-    # Build query with optional filters
+    # Build base query with optional filters
     must_clauses = [es._get_time_range_query(time_range)]
     if variant:
         must_clauses.append({"term": {"cowrie_variant": variant}})
     
+    # If filtering for sessions WITH commands, first find those session IDs
+    target_session_ids = None
+    if has_commands is True:
+        # Find sessions that have command events
+        cmd_query = {"bool": {"must": must_clauses + [
+            {"bool": {"should": [
+                {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                {"term": {"json.eventid": "cowrie.command.input"}}
+            ]}}
+        ]}}
+        
+        cmd_result = await es.search(
+            index=INDEX,
+            query=cmd_query,
+            size=0,
+            aggs={
+                "sessions_new": {"terms": {"field": "cowrie.session", "size": 1000}},
+                "sessions_old": {"terms": {"field": "json.session", "size": 1000}}
+            }
+        )
+        
+        target_session_ids = set()
+        for bucket in cmd_result.get("aggregations", {}).get("sessions_new", {}).get("buckets", []):
+            target_session_ids.add(bucket["key"])
+        for bucket in cmd_result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []):
+            target_session_ids.add(bucket["key"])
+        
+        if not target_session_ids:
+            return []  # No sessions with commands found
+    
+    # Determine fetch size - need more if filtering
+    fetch_size = limit * 10 if min_duration is not None or has_commands is False else limit
+    
     query = {"bool": {"must": must_clauses}} if len(must_clauses) > 1 else es._get_time_range_query(time_range)
     
-    # Request more sessions if we're going to filter client-side
-    fetch_size = limit * 5 if min_duration is not None or has_commands is not None else limit
+    # If we have specific target sessions, query them directly
+    if target_session_ids:
+        # Query sessions directly by their IDs
+        sessions = []
+        
+        for session_id in list(target_session_ids)[:limit]:
+            session_query = {"bool": {"must": [
+                es._get_time_range_query(time_range),
+                {"bool": {"should": [
+                    {"term": {"cowrie.session": session_id}},
+                    {"term": {"json.session": session_id}}
+                ]}}
+            ]}}
+            
+            if variant:
+                session_query["bool"]["must"].append({"term": {"cowrie_variant": variant}})
+            
+            result = await es.search(
+                index=INDEX,
+                query=session_query,
+                size=0,
+                aggs={
+                    "src_ip": {"top_hits": {"size": 1, "_source": ["cowrie.src_ip", "cowrie.geo.country_name", "json.src_ip", "source.geo.country_name", "cowrie_variant"]}},
+                    "start_time": {"min": {"field": "@timestamp"}},
+                    "end_time": {"max": {"field": "@timestamp"}},
+                    "commands": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                        {"term": {"json.eventid": "cowrie.command.input"}}
+                    ]}}},
+                    "login_success": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.login.success"}},
+                        {"term": {"json.eventid": "cowrie.login.success"}}
+                    ]}}}
+                }
+            )
+            
+            if result.get("hits", {}).get("total", {}).get("value", 0) == 0:
+                continue
+            
+            aggs = result.get("aggregations", {})
+            hit_source = aggs.get("src_ip", {}).get("hits", {}).get("hits", [{}])[0].get("_source", {})
+            cowrie_data = hit_source.get("cowrie", {})
+            json_data = hit_source.get("json", {})
+            
+            src_ip = cowrie_data.get("src_ip") or json_data.get("src_ip") or "unknown"
+            country = cowrie_data.get("geo", {}).get("country_name") or hit_source.get("source", {}).get("geo", {}).get("country_name")
+            
+            start = aggs.get("start_time", {}).get("value_as_string")
+            end = aggs.get("end_time", {}).get("value_as_string")
+            
+            duration = None
+            if start and end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                    duration = (end_dt - start_dt).total_seconds()
+                except:
+                    pass
+            
+            if min_duration is not None and (duration is None or duration < min_duration):
+                continue
+            
+            sessions.append(CowrieSession(
+                session_id=session_id,
+                src_ip=src_ip,
+                start_time=start or "",
+                end_time=end,
+                duration=duration,
+                commands_count=aggs.get("commands", {}).get("doc_count", 0),
+                country=country,
+                sensor=hit_source.get("cowrie_variant")
+            ))
+        
+        sessions.sort(key=lambda x: -(x.duration or 0))
+        return sessions
     
-    # Support both old (json.session) and new (cowrie.session) field structures
+    # Standard aggregation query for non-targeted sessions
     result = await es.search(
         index=INDEX,
         query=query,
@@ -300,9 +439,19 @@ async def get_cowrie_sessions(
     )
     
     sessions = []
+    seen_session_ids = set()
     
     # Process old format sessions
     for bucket in result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []):
+        session_id = bucket["key"]
+        
+        # Skip if we're filtering for specific sessions and this isn't one
+        if target_session_ids is not None and session_id not in target_session_ids:
+            continue
+        if session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(session_id)
+        
         hit = bucket["src_ip"]["hits"]["hits"][0]["_source"] if bucket["src_ip"]["hits"]["hits"] else {}
         json_data = hit.get("json", {})
         geo_data = hit.get("source", {}).get("geo", {})
@@ -323,7 +472,7 @@ async def get_cowrie_sessions(
                 pass
         
         session = CowrieSession(
-            session_id=bucket["key"],
+            session_id=session_id,
             src_ip=src_ip,
             start_time=start or "",
             end_time=end,
@@ -335,7 +484,8 @@ async def get_cowrie_sessions(
         
         if min_duration is not None and (session.duration is None or session.duration < min_duration):
             continue
-        if has_commands is not None:
+        # Skip has_commands filter here if we already filtered by target_session_ids
+        if has_commands is not None and target_session_ids is None:
             if has_commands and session.commands_count == 0:
                 continue
             if not has_commands and session.commands_count > 0:
@@ -344,6 +494,15 @@ async def get_cowrie_sessions(
     
     # Process new format sessions
     for bucket in result.get("aggregations", {}).get("sessions_new", {}).get("buckets", []):
+        session_id = bucket["key"]
+        
+        # Skip if we're filtering for specific sessions and this isn't one
+        if target_session_ids is not None and session_id not in target_session_ids:
+            continue
+        if session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(session_id)
+        
         hit = bucket["src_ip"]["hits"]["hits"][0]["_source"] if bucket["src_ip"]["hits"]["hits"] else {}
         cowrie_data = hit.get("cowrie", {})
         src_ip = cowrie_data.get("src_ip", "unknown")
@@ -363,7 +522,7 @@ async def get_cowrie_sessions(
                 pass
         
         session = CowrieSession(
-            session_id=bucket["key"],
+            session_id=session_id,
             src_ip=src_ip,
             start_time=start or "",
             end_time=end,
@@ -378,7 +537,8 @@ async def get_cowrie_sessions(
             if session.duration is None or session.duration < min_duration:
                 continue
         
-        if has_commands is not None:
+        # Skip has_commands filter if we already filtered by target_session_ids
+        if has_commands is not None and target_session_ids is None:
             if has_commands and session.commands_count == 0:
                 continue
             if not has_commands and session.commands_count > 0:
@@ -403,37 +563,57 @@ async def get_interesting_sessions(
     """
     Get 'interesting' sessions - those with duration > min_duration seconds.
     These are likely human attackers rather than automated scripts.
+    Supports both old (json.*) and new (cowrie.*) field structures.
     """
     es = get_es_service()
     
-    # Query for session.closed events with duration field
+    # Query for session.closed events with duration field - support both field structures
+    # We need to fetch more and filter in Python because duration fields vary
     result = await es.search(
         index=INDEX,
         query={
             "bool": {
                 "must": [
                     es._get_time_range_query(time_range),
-                    {"term": {"json.eventid": "cowrie.session.closed"}},
-                    {"range": {"json.duration": {"gte": min_duration}}}
+                    # Support both old (json.eventid) and new (cowrie.eventid)
+                    {"bool": {"should": [
+                        {"term": {"json.eventid": "cowrie.session.closed"}},
+                        {"term": {"cowrie.eventid": "cowrie.session.closed"}}
+                    ], "minimum_should_match": 1}},
+                    # Duration can be in multiple fields
+                    {"bool": {"should": [
+                        {"exists": {"field": "json.duration"}},
+                        {"exists": {"field": "cowrie.duration"}},
+                        {"exists": {"field": "cowrie.duration_seconds"}}
+                    ], "minimum_should_match": 1}}
                 ]
             }
         },
-        size=limit,
-        sort=[{"json.duration": "desc"}]
+        size=limit * 5,  # Fetch more to filter by duration
+        sort=[{"@timestamp": "desc"}]
     )
     
     sessions = []
     for hit in result.get("hits", {}).get("hits", []):
         source = hit["_source"]
         json_data = source.get("json", {})
-        geo_data = source.get("source", {}).get("geo", {})
+        cowrie_data = source.get("cowrie", {})
+        geo_data = cowrie_data.get("geo", {}) or source.get("source", {}).get("geo", {})
         
-        # Parse duration - can be float or string
-        raw_duration = json_data.get("duration")
+        # Parse duration - try multiple field locations
+        raw_duration = (
+            json_data.get("duration") or
+            cowrie_data.get("duration") or
+            cowrie_data.get("duration_seconds")
+        )
         try:
             duration = float(raw_duration) if raw_duration is not None else 0
         except (ValueError, TypeError):
             duration = 0
+        
+        # Filter by minimum duration
+        if duration < min_duration:
+            continue
         
         # Classify behavior based on duration
         if duration >= 60:
@@ -443,15 +623,25 @@ async def get_interesting_sessions(
         else:
             behavior = "Script"
         
+        # Get session ID and IP from either field structure
+        session_id = json_data.get("session") or cowrie_data.get("session")
+        src_ip = json_data.get("src_ip") or cowrie_data.get("src_ip") or "unknown"
+        
         sessions.append({
-            "session_id": json_data.get("session"),
-            "src_ip": json_data.get("src_ip", "unknown"),
+            "session_id": session_id,
+            "src_ip": src_ip,
             "duration": duration,
             "timestamp": source.get("@timestamp"),
             "country": geo_data.get("country_name"),
             "variant": source.get("cowrie_variant"),
             "behavior": behavior
         })
+        
+        if len(sessions) >= limit:
+            break
+    
+    # Sort by duration descending
+    sessions.sort(key=lambda x: -x["duration"])
     
     # Calculate stats
     durations = [s["duration"] for s in sessions if s["duration"] is not None]
@@ -604,32 +794,64 @@ async def get_session_commands(
     """Get all commands executed in a specific session."""
     es = get_es_service()
     
+    # Support both old (json.*) and new (cowrie.*) field structures
     result = await es.search(
         index=INDEX,
         query={
             "bool": {
                 "must": [
-                    {"term": {"json.session": session_id}},
-                    {"term": {"json.eventid": "cowrie.command.input"}}
+                    {"bool": {
+                        "should": [
+                            {"term": {"json.session": session_id}},
+                            {"term": {"cowrie.session": session_id}}
+                        ],
+                        "minimum_should_match": 1
+                    }},
+                    {"bool": {
+                        "should": [
+                            {"term": {"json.eventid": "cowrie.command.input"}},
+                            {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                        ],
+                        "minimum_should_match": 1
+                    }}
                 ]
             }
         },
-        size=200,
+        size=500,  # Increased to capture all commands
         sort=[{"@timestamp": "asc"}]
     )
     
     commands = []
+    seen = set()
+    last_command = None
+    
     for hit in result.get("hits", {}).get("hits", []):
         source = hit["_source"]
         json_data = source.get("json", {})
-        command = json_data.get("input", "")
+        cowrie_data = source.get("cowrie", {})
+        # Command input can be in json.input or cowrie.input
+        command = json_data.get("input", "") or cowrie_data.get("input", "")
         timestamp = source.get("@timestamp", "")
         
         if command:
-            commands.append({
-                "command": command,
-                "timestamp": timestamp
-            })
+            # Skip consecutive duplicate commands
+            if command == last_command:
+                continue
+            
+            # Normalize timestamp to second precision
+            ts = timestamp
+            if "." in ts:
+                ts = ts.split(".")[0] + "Z"
+            
+            # Deduplicate by (timestamp, command)
+            key = (ts, command)
+            if key not in seen:
+                seen.add(key)
+                commands.append({
+                    "command": command,
+                    "timestamp": timestamp
+                })
+                last_command = command
     
     return {"session_id": session_id, "commands": commands, "total": len(commands)}
 
@@ -642,10 +864,17 @@ async def get_session_details(
     """Get full session details including all events."""
     es = get_es_service()
     
+    # Support both old (json.*) and new (cowrie.*) field structures
     result = await es.search(
         index=INDEX,
-        query={"term": {"json.session": session_id}},
-        size=500,
+        query={"bool": {
+            "should": [
+                {"term": {"json.session": session_id}},
+                {"term": {"cowrie.session": session_id}}
+            ],
+            "minimum_should_match": 1
+        }},
+        size=1000,  # Increased to capture all events in long sessions
         sort=[{"@timestamp": "asc"}]
     )
     
@@ -657,8 +886,9 @@ async def get_session_details(
     for hit in result.get("hits", {}).get("hits", []):
         source = hit["_source"]
         json_data = source.get("json", {})
-        geo_data = source.get("source", {}).get("geo", {})
-        event_id = json_data.get("eventid", "")
+        cowrie_data = source.get("cowrie", {})
+        geo_data = cowrie_data.get("geo", {}) or source.get("source", {}).get("geo", {})
+        event_id = cowrie_data.get("eventid", "") or json_data.get("eventid", "")
         timestamp = source.get("@timestamp", "")
         
         event = {
@@ -670,10 +900,10 @@ async def get_session_details(
         # Extract session info from first connect event
         if event_id == "cowrie.session.connect" and not session_info:
             session_info = {
-                "src_ip": json_data.get("src_ip"),
+                "src_ip": cowrie_data.get("src_ip") or json_data.get("src_ip"),
                 "country": geo_data.get("country_name"),
                 "city": geo_data.get("city_name"),
-                "sensor": source.get("cowrie_variant") or source.get("observer", {}).get("name"),
+                "sensor": source.get("cowrie_variant") or cowrie_data.get("sensor") or source.get("observer", {}).get("name"),
                 "protocol": json_data.get("protocol"),
                 "start_time": timestamp
             }
@@ -681,21 +911,21 @@ async def get_session_details(
         # Extract session duration from closed event
         if event_id == "cowrie.session.closed":
             session_info["end_time"] = timestamp
-            duration = json_data.get("duration")
+            duration = json_data.get("duration") or cowrie_data.get("duration")
             if duration:
                 session_info["duration"] = duration
         
-        # Extract commands
+        # Extract commands (check both json.input and cowrie.input)
         if event_id == "cowrie.command.input":
-            cmd = json_data.get("input", "")
+            cmd = json_data.get("input", "") or cowrie_data.get("input", "")
             if cmd:
                 commands.append({"command": cmd, "timestamp": timestamp})
                 event["details"]["command"] = cmd
         
-        # Extract login attempts
+        # Extract login attempts (check both field structures)
         if event_id in ["cowrie.login.success", "cowrie.login.failed"]:
-            username = json_data.get("username", "")
-            password = json_data.get("password", "")
+            username = json_data.get("username", "") or cowrie_data.get("username", "")
+            password = json_data.get("password", "") or cowrie_data.get("password", "")
             credentials.append({
                 "username": username,
                 "password": password,
@@ -708,20 +938,44 @@ async def get_session_details(
         
         # Extract file downloads
         if event_id == "cowrie.session.file_download":
-            event["details"]["url"] = json_data.get("url", "")
-            event["details"]["sha256"] = json_data.get("sha256", "")
+            event["details"]["url"] = json_data.get("url", "") or cowrie_data.get("url", "")
+            event["details"]["sha256"] = json_data.get("sha256", "") or cowrie_data.get("sha256", "")
         
         # Extract client info
         if event_id == "cowrie.client.version":
-            event["details"]["version"] = json_data.get("version", "")
-            session_info["client_version"] = json_data.get("version", "")
+            version = json_data.get("version", "") or cowrie_data.get("version", "")
+            event["details"]["version"] = version
+            session_info["client_version"] = version
         
         events.append(event)
+    
+    # Deduplicate commands more aggressively:
+    # 1. Normalize timestamps to the second (ignore milliseconds)
+    # 2. Skip consecutive identical commands
+    seen_commands = set()
+    unique_commands = []
+    last_command = None
+    
+    for cmd in commands:
+        # Normalize timestamp to second precision for deduplication
+        ts = cmd["timestamp"]
+        if "." in ts:
+            ts = ts.split(".")[0] + "Z"  # Remove milliseconds
+        
+        # Skip if this is the same command as the last one (consecutive duplicate)
+        if cmd["command"] == last_command:
+            continue
+        
+        key = (ts, cmd["command"])
+        if key not in seen_commands:
+            seen_commands.add(key)
+            unique_commands.append(cmd)
+            last_command = cmd["command"]
     
     return {
         "session_id": session_id,
         "info": session_info,
-        "commands": commands,
+        "commands": unique_commands,
         "credentials": credentials,
         "events": events,
         "total_events": len(events)
@@ -1189,48 +1443,94 @@ async def get_cowrie_session_durations(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get session duration distribution."""
+    """Get session duration distribution. Supports both old and new field structures."""
     es = get_es_service()
     
+    # First, fetch raw duration data since field names vary
     result = await es.search(
         index=INDEX,
         query={"bool": {"must": [
             es._get_time_range_query(time_range),
-            {"exists": {"field": "cowrie.duration"}}
+            # Support multiple duration field locations
+            {"bool": {"should": [
+                {"exists": {"field": "json.duration"}},
+                {"exists": {"field": "cowrie.duration"}},
+                {"exists": {"field": "cowrie.duration_seconds"}}
+            ], "minimum_should_match": 1}}
         ]}},
-        size=0,
-        aggs={
-            "duration_ranges": {
-                "range": {
-                    "field": "cowrie.duration",
-                    "ranges": [
-                        {"key": "0-10s", "to": 10},
-                        {"key": "10-30s", "from": 10, "to": 30},
-                        {"key": "30s-1m", "from": 30, "to": 60},
-                        {"key": "1-5m", "from": 60, "to": 300},
-                        {"key": "5-15m", "from": 300, "to": 900},
-                        {"key": "15m+", "from": 900}
-                    ]
-                }
-            },
-            "avg_duration": {"avg": {"field": "cowrie.duration"}},
-            "max_duration": {"max": {"field": "cowrie.duration"}},
-            "percentiles": {"percentiles": {"field": "cowrie.duration", "percents": [50, 75, 90, 95]}}
-        }
+        size=10000,
+        fields=["json.duration", "cowrie.duration", "cowrie.duration_seconds"]
     )
     
-    ranges = []
-    for bucket in result.get("aggregations", {}).get("duration_ranges", {}).get("buckets", []):
-        ranges.append({
-            "range": bucket["key"],
-            "count": bucket["doc_count"]
-        })
+    # Collect durations manually
+    durations = []
+    for hit in result.get("hits", {}).get("hits", []):
+        try:
+            source = hit["_source"]
+            duration_val = (
+                source.get("json", {}).get("duration") or
+                source.get("cowrie", {}).get("duration") or
+                source.get("cowrie", {}).get("duration_seconds")
+            )
+            if duration_val is not None:
+                durations.append(float(duration_val))
+        except (ValueError, TypeError):
+            pass
     
-    stats = {
-        "avg_duration": round(result.get("aggregations", {}).get("avg_duration", {}).get("value", 0) or 0, 1),
-        "max_duration": round(result.get("aggregations", {}).get("max_duration", {}).get("value", 0) or 0, 1),
-        "percentiles": result.get("aggregations", {}).get("percentiles", {}).get("values", {})
+    # Build ranges manually
+    range_buckets = {
+        "0-10s": 0,
+        "10-30s": 0,
+        "30s-1m": 0,
+        "1-5m": 0,
+        "5-15m": 0,
+        "15m+": 0
     }
+    
+    for d in durations:
+        if d < 10:
+            range_buckets["0-10s"] += 1
+        elif d < 30:
+            range_buckets["10-30s"] += 1
+        elif d < 60:
+            range_buckets["30s-1m"] += 1
+        elif d < 300:
+            range_buckets["1-5m"] += 1
+        elif d < 900:
+            range_buckets["5-15m"] += 1
+        else:
+            range_buckets["15m+"] += 1
+    
+    ranges = [{"range": k, "count": v} for k, v in range_buckets.items()]
+    
+    # Calculate stats
+    if durations:
+        durations_sorted = sorted(durations)
+        
+        def percentile(data: List[float], p: float) -> float:
+            if not data:
+                return 0
+            k = (len(data) - 1) * p / 100
+            f = int(k)
+            c = f + 1 if f + 1 < len(data) else f
+            return data[f] + (k - f) * (data[c] - data[f]) if c != f else data[f]
+        
+        stats = {
+            "avg_duration": round(sum(durations) / len(durations), 1),
+            "max_duration": round(max(durations), 1),
+            "percentiles": {
+                "50.0": round(percentile(durations_sorted, 50), 1),
+                "75.0": round(percentile(durations_sorted, 75), 1),
+                "90.0": round(percentile(durations_sorted, 90), 1),
+                "95.0": round(percentile(durations_sorted, 95), 1)
+            }
+        }
+    else:
+        stats = {
+            "avg_duration": 0,
+            "max_duration": 0,
+            "percentiles": {"50.0": None, "75.0": None, "90.0": None, "95.0": None}
+        }
     
     return {"time_range": time_range, "ranges": ranges, "stats": stats}
 

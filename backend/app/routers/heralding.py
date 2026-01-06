@@ -58,6 +58,85 @@ async def get_heralding_timeline(
     )
 
 
+@router.get("/timeline-by-port")
+async def get_heralding_timeline_by_port(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get Heralding event timeline broken down by destination port."""
+    es = get_es_service()
+    
+    intervals = {"1h": "5m", "24h": "1h", "7d": "6h", "30d": "1d"}
+    interval = intervals.get(time_range, "1h")
+    
+    # Port to protocol mapping for display names
+    PORT_NAMES = {
+        21: "FTP", 23: "Telnet", 25: "SMTP", 80: "HTTP", 110: "POP3",
+        143: "IMAP", 443: "HTTPS", 993: "IMAPS", 995: "POP3S",
+        1080: "SOCKS5", 3306: "MySQL", 5432: "PostgreSQL", 5900: "VNC"
+    }
+    
+    result = await es.search(
+        index=INDEX,
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            "timeline": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": interval
+                },
+                "aggs": {
+                    "by_port": {
+                        "terms": {
+                            "field": "destination.port",
+                            "size": 15
+                        }
+                    }
+                }
+            },
+            "all_ports": {
+                "terms": {
+                    "field": "destination.port",
+                    "size": 15
+                }
+            }
+        }
+    )
+    
+    # Get list of all ports
+    all_ports = [
+        {
+            "port": bucket["key"],
+            "name": PORT_NAMES.get(bucket["key"], f"Port {bucket['key']}"),
+            "count": bucket["doc_count"]
+        }
+        for bucket in result.get("aggregations", {}).get("all_ports", {}).get("buckets", [])
+    ]
+    
+    # Build timeline data with port breakdown
+    timeline_data = []
+    for bucket in result.get("aggregations", {}).get("timeline", {}).get("buckets", []):
+        data_point = {
+            "timestamp": bucket["key_as_string"],
+            "total": bucket["doc_count"]
+        }
+        
+        # Add count for each port
+        for port_bucket in bucket.get("by_port", {}).get("buckets", []):
+            port = port_bucket["key"]
+            port_name = PORT_NAMES.get(port, f"port_{port}")
+            data_point[port_name] = port_bucket["doc_count"]
+        
+        timeline_data.append(data_point)
+    
+    return {
+        "data": timeline_data,
+        "ports": all_ports,
+        "time_range": time_range
+    }
+
+
 @router.get("/geo", response_model=GeoDistributionResponse)
 async def get_heralding_geo(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
@@ -920,4 +999,58 @@ async def get_heralding_credential_reuse(
             "usernames_used_by_multiple_ips": len([u for u, ips in username_to_ips.items() if len(ips) >= 2]),
             "combos_used_by_multiple_ips": len([c for c, ips in combo_to_ips.items() if len(ips) >= 2])
         }
+    }
+
+
+@router.get("/top-credentials")
+async def get_heralding_top_credentials(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    limit: int = Query(default=10, ge=1, le=50),
+    _: str = Depends(get_current_user)
+):
+    """Get top usernames and passwords separately."""
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query={"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"range": {"num_auth_attempts": {"gt": 0}}}
+        ]}},
+        size=2000,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    username_counts = {}
+    password_counts = {}
+    
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        auth_attempts = source.get("auth_attempts", [])
+        
+        for attempt in auth_attempts:
+            username = attempt.get("username", "")
+            password = attempt.get("password", "")
+            
+            if username:
+                username_counts[username] = username_counts.get(username, 0) + 1
+            if password:
+                password_counts[password] = password_counts.get(password, 0) + 1
+    
+    top_usernames = [
+        {"username": usr, "count": count}
+        for usr, count in sorted(username_counts.items(), key=lambda x: -x[1])[:limit]
+    ]
+    
+    top_passwords = [
+        {"password": pwd, "count": count}
+        for pwd, count in sorted(password_counts.items(), key=lambda x: -x[1])[:limit]
+    ]
+    
+    return {
+        "time_range": time_range,
+        "top_usernames": top_usernames,
+        "top_passwords": top_passwords,
+        "total_unique_usernames": len(username_counts),
+        "total_unique_passwords": len(password_counts)
     }

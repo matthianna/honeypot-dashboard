@@ -1,25 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
-import { Activity, Globe, Layers, Target } from 'lucide-react';
+import { Globe, Shield, Layers, Target, ShieldOff, ShieldCheck } from 'lucide-react';
 import 'leaflet/dist/leaflet.css';
 import api from '../services/api';
-import type { AttackEvent as ApiAttackEvent } from '../types';
 
-// Honeypot colors
-const HONEYPOT_COLORS: Record<string, string> = {
-  cowrie: '#39ff14',
-  dionaea: '#00d4ff',
-  galah: '#ff6600',
-  rdpy: '#bf00ff',
-  heralding: '#ff3366',
-};
-
-const HONEYPOT_NAMES: Record<string, string> = {
-  cowrie: 'Cowrie',
-  dionaea: 'Dionaea',
-  galah: 'Galah',
-  rdpy: 'RDPY',
-  heralding: 'Heralding',
+// Action colors
+const ACTION_COLORS: Record<string, string> = {
+  block: '#ff3366',
+  pass: '#39ff14',
+  reject: '#ff6600',
 };
 
 // Map tile layers
@@ -42,25 +31,24 @@ const MAP_LAYERS = {
   },
 };
 
-interface MapAttackEvent {
+interface FirewallEvent {
   id: string;
   timestamp: string;
-  honeypot: string;
   src_ip: string;
   src_lat: number;
   src_lon: number;
   src_country?: string;
   port?: number;
+  action: string;
+  protocol?: string;
   addedAt: number;
-}
-
-function hasValidCoordinates(event: ApiAttackEvent): event is ApiAttackEvent & { src_lat: number; src_lon: number } {
-  return typeof event.src_lat === 'number' && typeof event.src_lon === 'number';
 }
 
 interface TopCountry {
   country: string;
   count: number;
+  blocked: number;
+  passed: number;
 }
 
 // Layer switcher component
@@ -86,7 +74,7 @@ function LayerSwitcher({ currentLayer, onLayerChange }: { currentLayer: string; 
                 setIsOpen(false);
               }}
               className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
-                currentLayer === key ? 'bg-neon-green/20 text-neon-green' : 'text-white hover:bg-white/10'
+                currentLayer === key ? 'bg-neon-yellow/20 text-neon-yellow' : 'text-white hover:bg-white/10'
               }`}
             >
               {layer.name}
@@ -98,15 +86,16 @@ function LayerSwitcher({ currentLayer, onLayerChange }: { currentLayer: string; 
   );
 }
 
-export default function AttackMap() {
+export default function FirewallMap() {
   const [sessionStats, setSessionStats] = useState({
-    totalAttacks: 0,
+    totalEvents: 0,
+    blocked: 0,
+    passed: 0,
     uniqueIps: new Set<string>(),
     countries: new Set<string>(),
-    byHoneypot: {} as Record<string, number>,
   });
   
-  const [events, setEvents] = useState<MapAttackEvent[]>([]);
+  const [events, setEvents] = useState<FirewallEvent[]>([]);
   const [topCountries, setTopCountries] = useState<TopCountry[]>([]);
   const [mapLayer, setMapLayer] = useState('satellite');
   
@@ -117,22 +106,15 @@ export default function AttackMap() {
   const EVENT_LIFETIME = 5000;
   const POLL_INTERVAL = 5000;
 
-  const addEvents = useCallback((newEvents: ApiAttackEvent[]) => {
+  const addEvents = useCallback((newEvents: FirewallEvent[]) => {
     const now = Date.now();
-    const eventsToAdd: MapAttackEvent[] = [];
+    const eventsToAdd: FirewallEvent[] = [];
     
-    newEvents.filter(hasValidCoordinates).forEach(event => {
+    newEvents.forEach(event => {
       if (!seenIds.current.has(event.id)) {
         seenIds.current.add(event.id);
         eventsToAdd.push({
-          id: event.id,
-          timestamp: event.timestamp,
-          honeypot: event.honeypot,
-          src_ip: event.src_ip,
-          src_lat: event.src_lat,
-          src_lon: event.src_lon,
-          src_country: event.src_country,
-          port: event.port,
+          ...event,
           addedAt: now,
         });
         
@@ -143,14 +125,12 @@ export default function AttackMap() {
           const newCountries = new Set(prev.countries);
           if (event.src_country) newCountries.add(event.src_country);
           
-          const newByHoneypot = { ...prev.byHoneypot };
-          newByHoneypot[event.honeypot] = (newByHoneypot[event.honeypot] || 0) + 1;
-          
           return {
-            totalAttacks: prev.totalAttacks + 1,
+            totalEvents: prev.totalEvents + 1,
+            blocked: prev.blocked + (event.action === 'block' ? 1 : 0),
+            passed: prev.passed + (event.action === 'pass' ? 1 : 0),
             uniqueIps: newIps,
             countries: newCountries,
-            byHoneypot: newByHoneypot,
           };
         });
       }
@@ -172,7 +152,7 @@ export default function AttackMap() {
 
   const fetchTopCountries = useCallback(async () => {
     try {
-      const response = await api.getAttackMapTopCountries(10);
+      const response = await api.getFirewallMapTopCountries(10);
       setTopCountries(response.countries || []);
     } catch (error) {
       console.error('Failed to fetch top countries:', error);
@@ -181,7 +161,7 @@ export default function AttackMap() {
 
   const pollEvents = useCallback(async () => {
     try {
-      const response = await api.getAttackMapRecent(50, 10);
+      const response = await api.getFirewallMapRecent(50, 15);
       if (Array.isArray(response)) {
         addEvents(response);
       }
@@ -194,10 +174,11 @@ export default function AttackMap() {
     sessionStart.current = new Date();
     seenIds.current = new Set();
     setSessionStats({
-      totalAttacks: 0,
+      totalEvents: 0,
+      blocked: 0,
+      passed: 0,
       uniqueIps: new Set(),
       countries: new Set(),
-      byHoneypot: {},
     });
     
     fetchTopCountries();
@@ -215,13 +196,13 @@ export default function AttackMap() {
     };
   }, [pollEvents, fetchTopCountries]);
 
-  const getEventOpacity = (event: MapAttackEvent): number => {
+  const getEventOpacity = (event: FirewallEvent): number => {
     const age = Date.now() - event.addedAt;
     const remaining = EVENT_LIFETIME - age;
     return Math.max(0.1, remaining / EVENT_LIFETIME);
   };
 
-  const getEventRadius = (event: MapAttackEvent): number => {
+  const getEventRadius = (event: FirewallEvent): number => {
     const age = Date.now() - event.addedAt;
     const progress = age / EVENT_LIFETIME;
     if (progress < 0.3) {
@@ -229,6 +210,9 @@ export default function AttackMap() {
     }
     return 20 - (progress - 0.3) / 0.7 * 12;
   };
+
+  const activeBlocked = events.filter(e => e.action === 'block').length;
+  const activePassed = events.filter(e => e.action === 'pass').length;
 
   return (
     <div className="h-[calc(100vh-6rem)] relative rounded-xl overflow-hidden border border-bg-hover">
@@ -248,11 +232,11 @@ export default function AttackMap() {
         />
         <LayerSwitcher currentLayer={mapLayer} onLayerChange={setMapLayer} />
         
-        {/* Attack markers */}
+        {/* Event markers */}
         {events.map(event => {
           const opacity = getEventOpacity(event);
           const radius = getEventRadius(event);
-          const color = HONEYPOT_COLORS[event.honeypot] || '#39ff14';
+          const color = ACTION_COLORS[event.action] || '#ff3366';
           
           return (
             <CircleMarker
@@ -269,43 +253,46 @@ export default function AttackMap() {
             >
               <Popup>
                 <div className="text-sm min-w-[150px]">
-                  <div className="font-bold text-base" style={{ color }}>{HONEYPOT_NAMES[event.honeypot]}</div>
+                  <div className="font-bold text-base" style={{ color }}>
+                    {event.action === 'block' ? '🛑 BLOCKED' : '✅ PASSED'}
+                  </div>
                   <div className="text-gray-700 font-mono">{event.src_ip}</div>
                   <div className="text-gray-600">{event.src_country || 'Unknown'}</div>
                   {event.port && <div className="text-gray-500">Port: {event.port}</div>}
+                  {event.protocol && <div className="text-gray-500">Protocol: {event.protocol}</div>}
                 </div>
               </Popup>
             </CircleMarker>
           );
         })}
 
-        {/* Target marker (Zurich) */}
+        {/* Target marker (Lugano) */}
         <CircleMarker
-          center={[47.3769, 8.5417]}
+          center={[46.0037, 8.9511]}
           radius={10}
           pathOptions={{
-            color: '#ffffff',
-            fillColor: '#ffffff',
+            color: '#ffff00',
+            fillColor: '#ffff00',
             fillOpacity: 0.9,
             weight: 3,
           }}
         >
           <Popup>
-            <div className="text-sm font-bold">🎯 Honeypot Server</div>
-            <div className="text-gray-500">Zurich, Switzerland</div>
+            <div className="text-sm font-bold">🔥 Firewall</div>
+            <div className="text-gray-500">Lugano, Switzerland</div>
           </Popup>
         </CircleMarker>
       </MapContainer>
 
       {/* Header Overlay */}
       <div className="absolute top-4 left-4 z-[1000]">
-        <div className="bg-black/80 backdrop-blur-sm border border-neon-green/30 rounded-xl px-4 py-3">
+        <div className="bg-black/80 backdrop-blur-sm border border-neon-yellow/30 rounded-xl px-4 py-3">
           <div className="flex items-center gap-3">
-            <Activity className="w-6 h-6 text-neon-green" />
+            <Shield className="w-6 h-6 text-neon-yellow" />
             <div>
-              <h2 className="text-lg font-display font-bold text-neon-green">Live Attack Map</h2>
+              <h2 className="text-lg font-display font-bold text-neon-yellow">Live Firewall Map</h2>
               <div className="flex items-center gap-2 text-xs text-text-muted">
-                <span className="w-2 h-2 bg-neon-green rounded-full animate-pulse" />
+                <span className="w-2 h-2 bg-neon-yellow rounded-full animate-pulse" />
                 <span>Polling every 5s</span>
               </div>
             </div>
@@ -315,9 +302,9 @@ export default function AttackMap() {
 
       {/* Stats Overlay - Top Right */}
       <div className="absolute top-4 right-16 z-[1000] flex gap-2">
-        <div className="bg-black/80 backdrop-blur-sm border border-neon-green/30 rounded-xl px-4 py-2 text-center">
-          <div className="text-2xl font-display font-bold text-neon-green">{sessionStats.totalAttacks}</div>
-          <div className="text-xs text-text-muted">Total Attacks</div>
+        <div className="bg-black/80 backdrop-blur-sm border border-neon-yellow/30 rounded-xl px-4 py-2 text-center">
+          <div className="text-2xl font-display font-bold text-neon-yellow">{sessionStats.totalEvents}</div>
+          <div className="text-xs text-text-muted">Total Events</div>
         </div>
         <div className="bg-black/80 backdrop-blur-sm border border-neon-blue/30 rounded-xl px-4 py-2 text-center">
           <div className="text-2xl font-display font-bold text-neon-blue">{events.length}</div>
@@ -328,15 +315,30 @@ export default function AttackMap() {
       {/* Legend Overlay - Bottom Left */}
       <div className="absolute bottom-4 left-4 z-[1000]">
         <div className="bg-black/80 backdrop-blur-sm border border-white/10 rounded-xl p-3">
-          <div className="text-xs text-text-muted mb-2 font-semibold">HONEYPOTS</div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-            {Object.entries(HONEYPOT_COLORS).map(([key, color]) => (
-              <div key={key} className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
-                <span className="text-xs text-white">{HONEYPOT_NAMES[key]}</span>
-                <span className="text-xs font-mono text-text-muted ml-auto">{sessionStats.byHoneypot[key] || 0}</span>
+          <div className="text-xs text-text-muted mb-2 font-semibold">ACTIONS</div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <ShieldOff className="w-4 h-4 text-neon-red" />
+                <div className="w-3 h-3 rounded-full bg-neon-red" />
+                <span className="text-xs text-white">Blocked</span>
               </div>
-            ))}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono text-text-muted">{sessionStats.blocked}</span>
+                <span className="text-xs text-neon-red font-mono">({activeBlocked} live)</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-neon-green" />
+                <div className="w-3 h-3 rounded-full bg-neon-green" />
+                <span className="text-xs text-white">Passed</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono text-text-muted">{sessionStats.passed}</span>
+                <span className="text-xs text-neon-green font-mono">({activePassed} live)</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -361,12 +363,18 @@ export default function AttackMap() {
                       className="absolute inset-0 bg-neon-orange/20 rounded"
                       style={{ width: `${percentage}%` }}
                     />
-                    <div className="relative flex items-center justify-between px-2 py-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-neon-orange font-bold w-4">{index + 1}</span>
-                        <span className="text-xs text-white truncate max-w-[100px]">{country.country}</span>
+                    <div className="relative px-2 py-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-neon-orange font-bold w-4">{index + 1}</span>
+                          <span className="text-xs text-white truncate max-w-[90px]">{country.country}</span>
+                        </div>
+                        <span className="text-xs font-mono text-neon-yellow font-bold">{country.count.toLocaleString()}</span>
                       </div>
-                      <span className="text-xs font-mono text-neon-green font-bold">{country.count.toLocaleString()}</span>
+                      <div className="flex gap-2 text-[10px] mt-0.5 pl-6">
+                        <span className="text-neon-red">{country.blocked} blocked</span>
+                        <span className="text-neon-green">{country.passed} passed</span>
+                      </div>
                     </div>
                   </div>
                 );
@@ -379,8 +387,8 @@ export default function AttackMap() {
       {/* Target Info - Bottom Right */}
       <div className="absolute bottom-4 right-4 z-[1000]">
         <div className="bg-black/80 backdrop-blur-sm border border-white/20 rounded-xl px-3 py-2 flex items-center gap-2">
-          <Target className="w-4 h-4 text-white" />
-          <span className="text-xs text-white">Target: Zurich, CH</span>
+          <Target className="w-4 h-4 text-neon-yellow" />
+          <span className="text-xs text-white">Target: Lugano, CH</span>
         </div>
       </div>
     </div>

@@ -23,6 +23,8 @@ export interface TimelinePoint {
 export interface GeoPoint {
   country: string;
   count: number;
+  lat?: number;
+  lon?: number;
 }
 
 export interface TopAttacker {
@@ -30,7 +32,6 @@ export interface TopAttacker {
   count: number;
   country?: string;
   city?: string;
-  // Duration metrics for human vs script detection
   total_duration_seconds?: number;
   avg_session_duration?: number;
   session_count?: number;
@@ -72,6 +73,7 @@ export interface AttackMapStats {
   total_attacks: number;
   unique_ips: number;
   countries: number;
+  country_breakdown?: Record<string, number>;
 }
 
 // Cowrie types
@@ -83,6 +85,7 @@ export interface CowrieSession {
   duration?: number;
   commands_count: number;
   country?: string;
+  variant?: string;
 }
 
 export interface CowrieCredential {
@@ -223,7 +226,6 @@ export interface AttackerProfile {
   honeypot_activity: HoneypotActivity[];
   credentials_tried?: CowrieCredential[];
   commands_executed?: string[];
-  // Duration metrics for human vs script detection
   total_duration_seconds?: number;
   avg_session_duration?: number;
   session_count?: number;
@@ -242,6 +244,9 @@ export interface StatsResponse {
   total_events: number;
   unique_ips: number;
   time_range: string;
+  unique_ports?: number;
+  exposed_ports?: number;  // Total ports configured/exposed
+  attacked_ports?: number; // Ports that received attacks
 }
 
 export interface TimelineResponse {
@@ -284,4 +289,3 @@ export const HONEYPOT_NAMES: Record<HoneypotType, string> = {
   heralding: 'Heralding',
   firewall: 'Firewall',
 };
-

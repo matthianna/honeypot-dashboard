@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { BarChart2, Clock, Map, ShieldAlert, Scan, Users, Server, List, Filter, Eye, Globe } from 'lucide-react';
+import { BarChart2, Clock, Scan, Users, Server, List, Filter, Eye, ShieldAlert, AlertTriangle, TrendingUp, Target } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -8,8 +8,8 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  PieChart,
-  Pie,
+  BarChart,
+  Bar,
   Cell,
 } from 'recharts';
 import Card, { CardHeader, CardContent } from '../components/Card';
@@ -20,14 +20,13 @@ import DataTable from '../components/DataTable';
 import IPLink from '../components/IPLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import RawLogModal from '../components/RawLogModal';
-import FirewallAttackMap from '../components/FirewallAttackMap';
 import UnexposedPortsAnalysis from '../components/UnexposedPortsAnalysis';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
 import api from '../services/api';
-import type { FirewallBlockedTraffic, PortScanDetection, RepeatOffender, GeoPoint } from '../types';
+import type { FirewallBlockedTraffic, PortScanDetection, RepeatOffender } from '../types';
 
-const COLORS = ['#ffff00', '#39ff14', '#00d4ff', '#ff6600', '#bf00ff', '#ff3366'];
+const COLORS = ['#ff3366', '#ff6600', '#ffff00', '#39ff14', '#00d4ff', '#bf00ff'];
 const INTERNAL_IPS = ['193.246.121.231', '193.246.121.232', '193.246.121.233'];
 
 export default function Firewall() {
@@ -43,11 +42,6 @@ export default function Firewall() {
 
   const { data: timeline, loading: timelineLoading } = useApiWithRefresh(
     useCallback(() => api.getFirewallTimeline(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: geo, loading: geoLoading } = useApiWithRefresh(
-    useCallback(() => api.getFirewallGeo(timeRange), [timeRange]),
     [timeRange]
   );
 
@@ -80,8 +74,6 @@ export default function Firewall() {
     useCallback(() => api.getFirewallActions(timeRange), [timeRange]),
     [timeRange]
   );
-
-
 
   const formatTimestamp = (timestamp: string) => {
     try {
@@ -128,64 +120,7 @@ export default function Firewall() {
     },
   ];
 
-  const portScanColumns = [
-    {
-      key: 'src_ip',
-      header: 'Source IP',
-      render: (item: PortScanDetection) => <IPLink ip={item.src_ip} />,
-    },
-    {
-      key: 'unique_ports',
-      header: 'Ports Scanned',
-      render: (item: PortScanDetection) => (
-        <span className="font-mono text-neon-orange">{item.unique_ports}</span>
-      ),
-    },
-    {
-      key: 'first_seen',
-      header: 'First Seen',
-      render: (item: PortScanDetection) => (
-        <span className="text-text-secondary text-sm">{new Date(item.first_seen).toLocaleString()}</span>
-      ),
-    },
-    {
-      key: 'country',
-      header: 'Country',
-      render: (item: PortScanDetection) => (
-        <span className="text-text-secondary">{item.country || 'Unknown'}</span>
-      ),
-    },
-  ];
-
-  const repeatOffenderColumns = [
-    {
-      key: 'src_ip',
-      header: 'Source IP',
-      render: (item: RepeatOffender) => <IPLink ip={item.src_ip} />,
-    },
-    {
-      key: 'total_blocks',
-      header: 'Total Blocks',
-      render: (item: RepeatOffender) => (
-        <span className="font-mono text-neon-red">{item.total_blocks.toLocaleString()}</span>
-      ),
-    },
-    {
-      key: 'targeted_ports',
-      header: 'Targeted Ports',
-      render: (item: RepeatOffender) => (
-        <span className="text-text-secondary text-sm">{item.targeted_ports.slice(0, 5).join(', ')}</span>
-      ),
-    },
-    {
-      key: 'country',
-      header: 'Country',
-      render: (item: RepeatOffender) => (
-        <span className="text-text-secondary">{item.country || 'Unknown'}</span>
-      ),
-    },
-  ];
-
+  // Improved event columns - only show columns with data
   const eventColumns = [
     {
       key: 'timestamp',
@@ -205,7 +140,7 @@ export default function Firewall() {
           nat: 'text-neon-blue bg-neon-blue/20',
         };
         return (
-          <span className={`px-2 py-1 rounded text-xs font-mono ${actionColors[action] || 'text-text-secondary bg-bg-hover'}`}>
+          <span className={`px-2 py-1 rounded text-xs font-mono uppercase ${actionColors[action] || 'text-text-secondary bg-bg-hover'}`}>
             {action}
           </span>
         );
@@ -216,7 +151,13 @@ export default function Firewall() {
       header: 'Source',
       render: (item: Record<string, unknown>) => {
         const source = item.source as { ip: string; port: number } | undefined;
-        return source ? <IPLink ip={source.ip} /> : <span className="text-text-secondary">-</span>;
+        if (!source?.ip) return null;
+        return (
+          <div className="flex items-center gap-1">
+            <IPLink ip={source.ip} />
+            {source.port && <span className="text-text-muted text-xs">:{source.port}</span>}
+          </div>
+        );
       },
     },
     {
@@ -224,27 +165,32 @@ export default function Firewall() {
       header: 'Destination',
       render: (item: Record<string, unknown>) => {
         const dest = item.destination as { ip: string; port: number } | undefined;
-        return dest ? (
+        if (!dest?.ip) return null;
+        return (
           <span className="font-mono text-sm">
             <span className="text-text-primary">{dest.ip}</span>
-            <span className="text-text-secondary">:{dest.port}</span>
+            {dest.port && <span className="text-text-muted">:{dest.port}</span>}
           </span>
-        ) : <span className="text-text-secondary">-</span>;
+        );
       },
     },
     {
       key: 'transport',
       header: 'Protocol',
-      render: (item: Record<string, unknown>) => (
-        <span className="text-text-secondary text-sm uppercase">{item.transport as string || '-'}</span>
-      ),
+      render: (item: Record<string, unknown>) => {
+        const transport = item.transport as string;
+        if (!transport) return null;
+        return <span className="text-text-secondary text-sm uppercase">{transport}</span>;
+      },
     },
     {
       key: 'interface',
       header: 'Interface',
-      render: (item: Record<string, unknown>) => (
-        <span className="font-mono text-xs text-text-secondary">{item.interface as string || '-'}</span>
-      ),
+      render: (item: Record<string, unknown>) => {
+        const iface = item.interface as string;
+        if (!iface) return null;
+        return <span className="font-mono text-xs text-text-secondary">{iface}</span>;
+      },
     },
     {
       key: 'actions',
@@ -260,6 +206,25 @@ export default function Firewall() {
       ),
     },
   ];
+
+  // Port scan chart data
+  const portScanChartData = (portScans || []).slice(0, 10).map((scan: PortScanDetection, index: number) => ({
+    ip: scan.src_ip.length > 15 ? scan.src_ip.substring(0, 12) + '...' : scan.src_ip,
+    fullIp: scan.src_ip,
+    ports: scan.unique_ports,
+    color: COLORS[index % COLORS.length],
+    country: scan.country || 'Unknown',
+  }));
+
+  // Repeat offender chart data
+  const offenderChartData = (repeatOffenders || []).slice(0, 10).map((offender: RepeatOffender, index: number) => ({
+    ip: offender.src_ip.length > 15 ? offender.src_ip.substring(0, 12) + '...' : offender.src_ip,
+    fullIp: offender.src_ip,
+    blocks: offender.total_blocks,
+    color: COLORS[index % COLORS.length],
+    country: offender.country || 'Unknown',
+    ports: offender.targeted_ports.slice(0, 5).join(', '),
+  }));
 
   const tabs = [
     {
@@ -375,7 +340,7 @@ export default function Firewall() {
             <div className="overflow-x-auto">
               <DataTable 
                 columns={eventColumns} 
-                data={events?.events || []} 
+                data={(events?.events || []).filter((e: Record<string, unknown>) => e.action != null)} 
                 loading={eventsLoading} 
                 emptyMessage="No events found" 
               />
@@ -389,12 +354,154 @@ export default function Firewall() {
       label: 'Port Scans',
       icon: <Scan className="w-4 h-4" />,
       content: (
-        <Card>
-          <CardHeader title="Detected Port Scans" subtitle="IPs scanning multiple ports" />
-          <CardContent className="p-0">
-            <DataTable columns={portScanColumns} data={portScans || []} loading={portScansLoading} emptyMessage="No port scans detected" />
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Card className="bg-gradient-to-br from-neon-orange/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-orange/20">
+                    <Scan className="w-6 h-6 text-neon-orange" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-orange">
+                      {portScans?.length || 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Total Scanners</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-gradient-to-br from-neon-red/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-red/20">
+                    <Target className="w-6 h-6 text-neon-red" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-red">
+                      {portScans?.reduce((sum: number, s: PortScanDetection) => sum + s.unique_ports, 0) || 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Total Ports Scanned</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-gradient-to-br from-neon-purple/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-purple/20">
+                    <TrendingUp className="w-6 h-6 text-neon-purple" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-purple">
+                      {portScans && portScans.length > 0 
+                        ? Math.max(...portScans.map((s: PortScanDetection) => s.unique_ports))
+                        : 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Max Ports by Single IP</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Bar Chart */}
+            <Card>
+              <CardHeader 
+                title="Top Port Scanners" 
+                subtitle="IPs scanning the most ports"
+                icon={<Scan className="w-5 h-5 text-neon-orange" />}
+              />
+              <CardContent>
+                {portScansLoading ? (
+                  <div className="h-80 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-80">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={portScanChartData} layout="vertical" margin={{ left: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis type="number" stroke="#888888" />
+                        <YAxis 
+                          dataKey="ip" 
+                          type="category" 
+                          stroke="#888888"
+                          width={120}
+                          tick={{ fontSize: 11, fill: '#888888' }}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: '#1a1a25',
+                            border: '1px solid #252532',
+                            borderRadius: '8px',
+                          }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Ports Scanned']}
+                          labelFormatter={(label) => {
+                            const item = portScanChartData.find(d => d.ip === label);
+                            return item ? `${item.fullIp} (${item.country})` : label;
+                          }}
+                        />
+                        <Bar dataKey="ports" radius={[0, 4, 4, 0]}>
+                          {portScanChartData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Detailed Table */}
+            <Card>
+              <CardHeader 
+                title="Port Scanner Details" 
+                subtitle="Complete scanner information"
+                icon={<AlertTriangle className="w-5 h-5 text-neon-orange" />}
+              />
+              <CardContent className="p-0">
+                <div className="max-h-80 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-bg-card border-b border-bg-hover">
+                      <tr>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">Source IP</th>
+                        <th className="text-right py-3 px-4 text-text-secondary font-medium">Ports</th>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">Country</th>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">First Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bg-hover">
+                      {(portScans || []).slice(0, 15).map((scan: PortScanDetection, index: number) => (
+                        <tr key={scan.src_ip} className="hover:bg-bg-hover/50">
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-2">
+                              <div 
+                                className="w-2 h-2 rounded-full" 
+                                style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                              />
+                              <IPLink ip={scan.src_ip} />
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <span className="font-mono text-neon-orange font-bold">
+                              {scan.unique_ports.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-text-secondary">{scan.country || 'Unknown'}</td>
+                          <td className="py-3 px-4 text-text-muted text-xs">
+                            {new Date(scan.first_seen).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       ),
     },
     {
@@ -402,12 +509,155 @@ export default function Firewall() {
       label: 'Repeat Offenders',
       icon: <Users className="w-4 h-4" />,
       content: (
-        <Card>
-          <CardHeader title="Repeat Offenders" subtitle="IPs blocked multiple times" />
-          <CardContent className="p-0">
-            <DataTable columns={repeatOffenderColumns} data={repeatOffenders || []} loading={repeatOffendersLoading} emptyMessage="No repeat offenders" />
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Card className="bg-gradient-to-br from-neon-red/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-red/20">
+                    <Users className="w-6 h-6 text-neon-red" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-red">
+                      {repeatOffenders?.length || 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Repeat Offenders</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-gradient-to-br from-neon-orange/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-orange/20">
+                    <ShieldAlert className="w-6 h-6 text-neon-orange" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-orange">
+                      {repeatOffenders?.reduce((sum: number, o: RepeatOffender) => sum + o.total_blocks, 0)?.toLocaleString() || 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Total Blocks</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-gradient-to-br from-neon-purple/10 to-transparent">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-lg bg-neon-purple/20">
+                    <TrendingUp className="w-6 h-6 text-neon-purple" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-purple">
+                      {repeatOffenders && repeatOffenders.length > 0 
+                        ? Math.max(...repeatOffenders.map((o: RepeatOffender) => o.total_blocks)).toLocaleString()
+                        : 0}
+                    </div>
+                    <div className="text-sm text-text-secondary">Max Blocks by Single IP</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Bar Chart */}
+            <Card>
+              <CardHeader 
+                title="Top Offenders" 
+                subtitle="Most frequently blocked IPs"
+                icon={<Users className="w-5 h-5 text-neon-red" />}
+              />
+              <CardContent>
+                {repeatOffendersLoading ? (
+                  <div className="h-80 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-80">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={offenderChartData} layout="vertical" margin={{ left: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis type="number" stroke="#888888" />
+                        <YAxis 
+                          dataKey="ip" 
+                          type="category" 
+                          stroke="#888888"
+                          width={120}
+                          tick={{ fontSize: 11, fill: '#888888' }}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: '#1a1a25',
+                            border: '1px solid #252532',
+                            borderRadius: '8px',
+                          }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Times Blocked']}
+                          labelFormatter={(label) => {
+                            const item = offenderChartData.find(d => d.ip === label);
+                            return item ? `${item.fullIp} (${item.country})` : label;
+                          }}
+                        />
+                        <Bar dataKey="blocks" radius={[0, 4, 4, 0]}>
+                          {offenderChartData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Detailed Table */}
+            <Card>
+              <CardHeader 
+                title="Offender Details" 
+                subtitle="Complete offender information"
+                icon={<AlertTriangle className="w-5 h-5 text-neon-red" />}
+              />
+              <CardContent className="p-0">
+                <div className="max-h-80 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-bg-card border-b border-bg-hover">
+                      <tr>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">Source IP</th>
+                        <th className="text-right py-3 px-4 text-text-secondary font-medium">Blocks</th>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">Country</th>
+                        <th className="text-left py-3 px-4 text-text-secondary font-medium">Ports</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bg-hover">
+                      {(repeatOffenders || []).slice(0, 15).map((offender: RepeatOffender, index: number) => (
+                        <tr key={offender.src_ip} className="hover:bg-bg-hover/50">
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-2">
+                              <div 
+                                className="w-2 h-2 rounded-full" 
+                                style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                              />
+                              <IPLink ip={offender.src_ip} />
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <span className="font-mono text-neon-red font-bold">
+                              {offender.total_blocks.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-text-secondary">{offender.country || 'Unknown'}</td>
+                          <td className="py-3 px-4 text-text-muted text-xs">
+                            {offender.targeted_ports.slice(0, 5).join(', ')}
+                            {offender.targeted_ports.length > 5 && '...'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       ),
     },
     {
@@ -490,66 +740,6 @@ export default function Firewall() {
               </CardContent>
             </Card>
           )}
-        </div>
-      ),
-    },
-    {
-      id: 'map',
-      label: 'Geographic',
-      icon: <Map className="w-4 h-4" />,
-      content: (
-        <Card>
-          <CardHeader title="Traffic Origins" />
-          <CardContent>
-            {geoLoading ? (
-              <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={geo?.data?.slice(0, 6) || []} dataKey="count" nameKey="country" cx="50%" cy="50%" outerRadius={80} label>
-                        {geo?.data?.slice(0, 6).map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="space-y-2">
-                  {geo?.data?.slice(0, 12).map((item: GeoPoint, index: number) => (
-                    <div key={item.country} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                      <div className="flex items-center">
-                        <div className="w-3 h-3 rounded-full mr-3" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                        <span className="text-text-primary">{item.country}</span>
-                      </div>
-                      <span className="font-mono text-neon-yellow">{item.count.toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ),
-    },
-    {
-      id: 'attack-map',
-      label: 'Attack Map',
-      icon: <Globe className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          <Card>
-            <CardHeader 
-              title="Live Firewall Attack Map" 
-              subtitle="Real-time visualization of blocked traffic"
-              icon={<Globe className="w-5 h-5" />} 
-            />
-            <CardContent className="p-0">
-              <FirewallAttackMap timeRange={timeRange} />
-            </CardContent>
-          </Card>
         </div>
       ),
     },

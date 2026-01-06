@@ -24,8 +24,8 @@ def extract_geo_from_event(event: dict, honeypot: str) -> Optional[str]:
 def extract_src_ip_from_event(event: dict, honeypot: str) -> Optional[str]:
     """Extract source IP from event based on honeypot type."""
     if honeypot == "cowrie":
-        # New Cowrie structure uses json.src_ip
-        return event.get("json", {}).get("src_ip")
+        # Support both old (json.src_ip) and new (cowrie.src_ip) field structures
+        return event.get("json", {}).get("src_ip") or event.get("cowrie", {}).get("src_ip")
     else:
         return event.get("source", {}).get("ip")
 
@@ -49,14 +49,17 @@ async def get_attacker_profile(
     """
     es = get_es_service()
     
-    # Get events for this IP across all honeypots
-    events_by_honeypot = await es.get_events_for_ip(ip, time_range=time_range)
+    # Get accurate event counts per honeypot using count API
+    honeypot_event_counts = await es.get_event_counts_for_ip(ip, time_range=time_range)
     
-    if not events_by_honeypot:
+    # Get sample events for this IP across all honeypots (limited for details)
+    events_by_honeypot = await es.get_events_for_ip(ip, time_range=time_range, size=500)
+    
+    if not events_by_honeypot and not honeypot_event_counts:
         raise HTTPException(status_code=404, detail=f"No events found for IP {ip}")
     
     # Aggregate data
-    total_events = 0
+    total_events = sum(honeypot_event_counts.values())
     all_timestamps = []
     countries = set()
     honeypot_activity = []
@@ -65,7 +68,8 @@ async def get_attacker_profile(
     all_session_durations = []
     
     for honeypot, events in events_by_honeypot.items():
-        total_events += len(events)
+        # Use actual count from aggregation, not len(events)
+        actual_event_count = honeypot_event_counts.get(honeypot, len(events))
         
         # Track sessions for this honeypot
         sessions = {}
@@ -86,7 +90,8 @@ async def get_attacker_profile(
             # Track session for duration calculation
             session_id = None
             if honeypot == "cowrie":
-                session_id = event.get("cowrie", {}).get("session")
+                # Support both cowrie.* and json.* field structures
+                session_id = event.get("cowrie", {}).get("session") or event.get("json", {}).get("session")
             elif honeypot == "galah":
                 session_id = event.get("session", {}).get("id")
             elif honeypot == "heralding":
@@ -103,18 +108,22 @@ async def get_attacker_profile(
             
             # Extract credentials based on honeypot type
             if honeypot == "cowrie":
-                cowrie = event.get("cowrie", {})
-                username = cowrie.get("username")
-                password = cowrie.get("password")
+                # Support both cowrie.* and json.* field structures
+                cowrie = event.get("cowrie", {}) or {}
+                json_data = event.get("json", {}) or {}
+                
+                username = cowrie.get("username") or json_data.get("username")
+                password = cowrie.get("password") or json_data.get("password")
                 if username:
                     credentials_tried.append({
                         "username": username,
                         "password": password or ""
                     })
                 
-                # Extract commands
-                if cowrie.get("eventid") == "cowrie.command.input":
-                    command = cowrie.get("input")
+                # Extract commands - check both field structures
+                eventid = cowrie.get("eventid") or json_data.get("eventid")
+                if eventid == "cowrie.command.input":
+                    command = cowrie.get("input") or json_data.get("input")
                     if command:
                         commands_executed.append(command)
             
@@ -154,7 +163,7 @@ async def get_attacker_profile(
             timestamps.sort()
             honeypot_activity.append(HoneypotActivity(
                 honeypot=honeypot,
-                event_count=len(events),
+                event_count=actual_event_count,  # Use actual count, not len(events)
                 first_seen=timestamps[0],
                 last_seen=timestamps[-1],
                 duration_seconds=round(honeypot_duration, 2) if honeypot_duration else None,
@@ -489,11 +498,16 @@ HONEYPOT_INDICES = {
     "galah": ".ds-galah-*",
     "rdpy": ".ds-rdpy-*",
     "heralding": ".ds-heralding-*",
+    "firewall": "filebeat-*",
 }
+
+# Firewall logs have a 1-hour timezone offset
+FIREWALL_TIMEZONE_OFFSET_HOURS = 1
 
 HONEYPOT_COLORS = {
     "cowrie": "#39ff14",
     "dionaea": "#00d4ff",
+    "firewall": "#ffd700",
     "galah": "#ff6600",
     "rdpy": "#bf00ff",
     "heralding": "#ff3366",
@@ -505,65 +519,116 @@ async def get_attackers_by_country(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get attacker statistics grouped by country."""
+    """
+    Get attacker statistics grouped by country.
+    
+    Uses unified global stats for consistent numbers with Dashboard.
+    Excludes firewall to match honeypot-focused view.
+    """
     es = get_es_service()
     
-    countries = {}
+    # Use unified global stats (same as Dashboard) for consistency
+    global_stats = await es.get_global_stats(time_range)
     
-    for honeypot, index in HONEYPOT_INDICES.items():
-        try:
-            # Determine fields based on honeypot
-            # Note: For aggregations, text fields need .keyword suffix
-            if honeypot == "cowrie":
-                ip_field = "json.src_ip"
-                country_field = "source.geo.country_name"
-            else:
-                ip_field = "source.ip"
-                country_field = "source.geo.country_name"
-            
-            result = await es.search(
-                index=index,
-                query=es._get_time_range_query(time_range),
-                size=0,
-                aggs={
-                    "countries": {
-                        "terms": {"field": country_field, "size": 100},
-                        "aggs": {
-                            "unique_ips": {"cardinality": {"field": ip_field}},
-                            "events": {"value_count": {"field": "@timestamp"}}
+    # Get country breakdown with per-honeypot data
+    # Exclude firewall to focus on honeypots only
+    country_data = {}
+    honeypot_indices = {k: v for k, v in es.INDICES.items() if k != "firewall"}
+    
+    for honeypot, index in honeypot_indices.items():
+        is_firewall = False
+        time_query = es._get_time_range_query(time_range, is_firewall=is_firewall)
+        
+        # Build query with proper filters
+        must_clauses = [time_query]
+        must_clauses.extend(es._get_base_filter(index))
+        
+        must_not_clauses = es._get_internal_ip_exclusion(index)
+        if honeypot == "dionaea":
+            must_not_clauses.extend(es._get_dionaea_noise_exclusion())
+        
+        query = {"bool": {"must": must_clauses, "must_not": must_not_clauses}}
+        
+        # Get the right field names
+        # For Cowrie, we need to try multiple possible geo fields
+        if honeypot == "cowrie":
+            # Cowrie may have geo data in different locations depending on pipeline
+            country_fields = [
+                "source.geo.country_name",      # Standard ECS location
+                "cowrie.geo.country_name",      # Cowrie-specific namespace
+                "source.geo.country_name.keyword",  # Keyword variant
+            ]
+            ip_fields = ["json.src_ip", "cowrie.src_ip", "source.ip"]
+        else:
+            country_fields = [es._get_field(index, "geo_country")]
+            ip_fields = [es._get_field(index, "src_ip")]
+        
+        # Try each combination of country/IP fields until we get results
+        got_results = False
+        for country_field in country_fields:
+            if got_results:
+                break
+            for ip_field in ip_fields:
+                try:
+                    result = await es.search(
+                        index=index,
+                        query=query,
+                        size=0,
+                        aggs={
+                            "countries": {
+                                "terms": {"field": country_field, "size": 300},
+                                "aggs": {
+                                    "unique_ips": {"cardinality": {"field": ip_field}}
+                                }
+                            }
                         }
-                    }
-                }
-            )
-            
-            for bucket in result.get("aggregations", {}).get("countries", {}).get("buckets", []):
-                country = bucket["key"]
-                if country not in countries:
-                    countries[country] = {
-                        "country": country,
-                        "total_events": 0,
-                        "unique_ips": 0,
-                        "honeypots": {},
-                    }
-                
-                countries[country]["total_events"] += bucket["doc_count"]
-                countries[country]["unique_ips"] += bucket["unique_ips"]["value"]
-                countries[country]["honeypots"][honeypot] = {
-                    "events": bucket["doc_count"],
-                    "ips": bucket["unique_ips"]["value"],
-                    "color": HONEYPOT_COLORS[honeypot]
-                }
-        except Exception as e:
-            print(f"Error fetching {honeypot}: {e}")
-            continue
+                    )
+                    
+                    buckets = result.get("aggregations", {}).get("countries", {}).get("buckets", [])
+                    if not buckets:
+                        continue  # Try next field combination
+                    
+                    got_results = True
+                    for bucket in buckets:
+                        country = bucket["key"]
+                        if not country or country in ["", "Unknown", "Private range"]:
+                            continue
+                            
+                        if country not in country_data:
+                            country_data[country] = {
+                                "country": country,
+                                "total_events": 0,
+                                "unique_ips": 0,
+                                "honeypots": {}
+                            }
+                        
+                        country_data[country]["total_events"] += bucket["doc_count"]
+                        country_data[country]["honeypots"][honeypot] = {
+                            "events": bucket["doc_count"],
+                            "ips": bucket["unique_ips"]["value"],
+                            "color": HONEYPOT_COLORS.get(honeypot, "#ffffff")
+                        }
+                    break  # Success, exit ip_field loop
+                except Exception as e:
+                    # Try next field combination
+                    continue
+        
+        if not got_results:
+            print(f"Warning: No country data found for {honeypot} with any field combination")
     
-    # Sort by total events
-    sorted_countries = sorted(countries.values(), key=lambda x: -x["total_events"])
+    # Calculate unique IPs per country (deduplicated)
+    for country in country_data.values():
+        country["unique_ips"] = sum(hp["ips"] for hp in country["honeypots"].values())
+    
+    # Sort by events
+    countries_list = sorted(country_data.values(), key=lambda x: -x["total_events"])
     
     return {
         "time_range": time_range,
-        "countries": sorted_countries,
-        "total_countries": len(sorted_countries)
+        "countries": countries_list,
+        "total_countries": len(countries_list),
+        "total_unique_ips": global_stats["total_unique_ips"],
+        "total_events": global_stats["total_events"]
     }
 
 
@@ -579,77 +644,104 @@ async def get_country_attackers(
     attackers = {}
     
     for honeypot, index in HONEYPOT_INDICES.items():
-        try:
-            # Determine fields based on honeypot
-            # Note: For aggregations, text fields need .keyword suffix
-            if honeypot == "cowrie":
-                ip_field = "json.src_ip"
-                country_field = "source.geo.country_name"
-                city_field = "source.geo.city_name"
-            else:
-                ip_field = "source.ip"
-                country_field = "source.geo.country_name"
-                city_field = "source.geo.city_name"
-            
-            result = await es.search(
-                index=index,
-                query={
-                    "bool": {
-                        "must": [
-                            es._get_time_range_query(time_range),
-                            {"term": {country_field: country_name}}
-                        ]
-                    }
-                },
-                size=0,
-                aggs={
-                    "attackers": {
-                        "terms": {"field": ip_field, "size": 100},
-                        "aggs": {
-                            "events": {"value_count": {"field": "@timestamp"}},
-                            "first_seen": {"min": {"field": "@timestamp"}},
-                            "last_seen": {"max": {"field": "@timestamp"}},
-                            "city": {
-                                "terms": {"field": city_field, "size": 1}
+        # Handle different field structures per honeypot
+        # For Cowrie, try multiple country field options since geo data may be in different locations
+        if honeypot == "cowrie":
+            ip_fields = ["json.src_ip", "cowrie.src_ip", "source.ip"]
+            country_fields = ["source.geo.country_name", "cowrie.geo.country_name"]
+            city_fields = ["source.geo.city_name", "cowrie.geo.city_name"]
+        elif honeypot == "dionaea":
+            ip_fields = ["source.ip.keyword"]
+            country_fields = ["source.geo.country_name.keyword"]
+            city_fields = ["source.geo.city_name.keyword"]
+        elif honeypot == "firewall":
+            ip_fields = ["fw.src_ip"]
+            country_fields = ["source.geo.country_name"]
+            city_fields = ["source.geo.city_name"]
+        else:
+            ip_fields = ["source.ip"]
+            country_fields = ["source.geo.country_name"]
+            city_fields = ["source.geo.city_name"]
+        
+        # Apply firewall time offset
+        is_firewall = honeypot == "firewall"
+        time_query = es._get_time_range_query(time_range, is_firewall=is_firewall)
+        
+        # Try each combination of fields until we get results
+        got_results = False
+        for country_field in country_fields:
+            if got_results:
+                break
+            for city_field in city_fields:
+                if got_results:
+                    break
+                for ip_field in ip_fields:
+                    try:
+                        result = await es.search(
+                            index=index,
+                            query={
+                                "bool": {
+                                    "must": [
+                                        time_query,
+                                        {"term": {country_field: country_name}}
+                                    ]
+                                }
+                            },
+                            size=0,
+                            aggs={
+                                "attackers": {
+                                    "terms": {"field": ip_field, "size": 100},
+                                    "aggs": {
+                                        "events": {"value_count": {"field": "@timestamp"}},
+                                        "first_seen": {"min": {"field": "@timestamp"}},
+                                        "last_seen": {"max": {"field": "@timestamp"}},
+                                        "city": {
+                                            "terms": {"field": city_field, "size": 1}
+                                        }
+                                    }
+                                }
                             }
-                        }
-                    }
-                }
-            )
-            
-            for bucket in result.get("aggregations", {}).get("attackers", {}).get("buckets", []):
-                ip = bucket["key"]
-                if ip not in attackers:
-                    city_buckets = bucket.get("city", {}).get("buckets", [])
-                    city = city_buckets[0]["key"] if city_buckets else None
-                    
-                    attackers[ip] = {
-                        "ip": ip,
-                        "country": country_name,
-                        "city": city,
-                        "total_events": 0,
-                        "first_seen": bucket["first_seen"]["value_as_string"],
-                        "last_seen": bucket["last_seen"]["value_as_string"],
-                        "honeypots_attacked": [],
-                        "honeypot_details": {},
-                    }
-                
-                attackers[ip]["total_events"] += bucket["doc_count"]
-                attackers[ip]["honeypots_attacked"].append(honeypot)
-                attackers[ip]["honeypot_details"][honeypot] = {
-                    "events": bucket["doc_count"],
-                    "color": HONEYPOT_COLORS[honeypot]
-                }
-                
-                # Update first/last seen
-                if bucket["first_seen"]["value_as_string"] < attackers[ip]["first_seen"]:
-                    attackers[ip]["first_seen"] = bucket["first_seen"]["value_as_string"]
-                if bucket["last_seen"]["value_as_string"] > attackers[ip]["last_seen"]:
-                    attackers[ip]["last_seen"] = bucket["last_seen"]["value_as_string"]
-                    
-        except Exception as e:
-            print(f"Error fetching {honeypot} for {country_name}: {e}")
-            continue
+                        )
+                        
+                        buckets = result.get("aggregations", {}).get("attackers", {}).get("buckets", [])
+                        if not buckets:
+                            continue  # Try next field combination
+                        
+                        got_results = True
+                        for bucket in buckets:
+                            ip = bucket["key"]
+                            if ip not in attackers:
+                                city_buckets = bucket.get("city", {}).get("buckets", [])
+                                city = city_buckets[0]["key"] if city_buckets else None
+                                
+                                attackers[ip] = {
+                                    "ip": ip,
+                                    "country": country_name,
+                                    "city": city,
+                                    "total_events": 0,
+                                    "first_seen": bucket["first_seen"]["value_as_string"],
+                                    "last_seen": bucket["last_seen"]["value_as_string"],
+                                    "honeypots_attacked": [],
+                                    "honeypot_details": {},
+                                }
+                            
+                            attackers[ip]["total_events"] += bucket["doc_count"]
+                            if honeypot not in attackers[ip]["honeypots_attacked"]:
+                                attackers[ip]["honeypots_attacked"].append(honeypot)
+                            if honeypot not in attackers[ip]["honeypot_details"]:
+                                attackers[ip]["honeypot_details"][honeypot] = {"events": 0, "color": HONEYPOT_COLORS.get(honeypot, "#ffd700")}
+                            attackers[ip]["honeypot_details"][honeypot]["events"] += bucket["doc_count"]
+                            
+                            # Update first/last seen
+                            if bucket["first_seen"]["value_as_string"] < attackers[ip]["first_seen"]:
+                                attackers[ip]["first_seen"] = bucket["first_seen"]["value_as_string"]
+                            if bucket["last_seen"]["value_as_string"] > attackers[ip]["last_seen"]:
+                                attackers[ip]["last_seen"] = bucket["last_seen"]["value_as_string"]
+                        break  # Success, exit ip_field loop
+                            
+                    except Exception as e:
+                        # Try next field combination
+                        continue
     
     # Sort by total events
     sorted_attackers = sorted(attackers.values(), key=lambda x: -x["total_events"])
@@ -669,71 +761,94 @@ async def get_top_attackers_list(
     limit: int = Query(default=50, ge=1, le=200),
     _: str = Depends(get_current_user)
 ):
-    """Get top attackers across all honeypots."""
+    """Get top attackers across all honeypots (excludes firewall for consistency)."""
     es = get_es_service()
     
     attackers = {}
     
-    for honeypot, index in HONEYPOT_INDICES.items():
-        try:
-            # Note: For aggregations, text fields need .keyword suffix
-            if honeypot == "cowrie":
-                ip_field = "json.src_ip"
-                country_field = "source.geo.country_name"
-            else:
-                ip_field = "source.ip"
-                country_field = "source.geo.country_name"
-            
-            result = await es.search(
-                index=index,
-                query=es._get_time_range_query(time_range),
-                size=0,
-                aggs={
-                    "top_ips": {
-                        "terms": {"field": ip_field, "size": limit * 2},
-                        "aggs": {
-                            "events": {"value_count": {"field": "@timestamp"}},
-                            "country": {"terms": {"field": country_field, "size": 1}},
-                            "first_seen": {"min": {"field": "@timestamp"}},
-                            "last_seen": {"max": {"field": "@timestamp"}}
+    # Exclude firewall to match Dashboard honeypot-only view
+    honeypot_only_indices = {k: v for k, v in HONEYPOT_INDICES.items() if k != "firewall"}
+    
+    for honeypot, index in honeypot_only_indices.items():
+        # Handle different field structures per honeypot
+        # For Cowrie, try multiple country field options since geo data may be in different locations
+        if honeypot == "cowrie":
+            ip_fields = ["json.src_ip", "cowrie.src_ip", "source.ip"]
+            country_fields = ["source.geo.country_name", "cowrie.geo.country_name"]
+        elif honeypot == "dionaea":
+            ip_fields = ["source.ip.keyword"]
+            country_fields = ["source.geo.country_name.keyword"]
+        else:
+            ip_fields = ["source.ip"]
+            country_fields = ["source.geo.country_name"]
+        
+        time_query = es._get_time_range_query(time_range, is_firewall=False)
+        
+        # Try each combination of fields until we get results
+        got_results = False
+        for country_field in country_fields:
+            if got_results:
+                break
+            for ip_field in ip_fields:
+                try:
+                    result = await es.search(
+                        index=index,
+                        query=time_query,
+                        size=0,
+                        aggs={
+                            "top_ips": {
+                                "terms": {"field": ip_field, "size": limit * 2},
+                                "aggs": {
+                                    "events": {"value_count": {"field": "@timestamp"}},
+                                    "country": {"terms": {"field": country_field, "size": 1}},
+                                    "first_seen": {"min": {"field": "@timestamp"}},
+                                    "last_seen": {"max": {"field": "@timestamp"}}
+                                }
+                            }
                         }
-                    }
-                }
-            )
-            
-            for bucket in result.get("aggregations", {}).get("top_ips", {}).get("buckets", []):
-                ip = bucket["key"]
-                country_buckets = bucket.get("country", {}).get("buckets", [])
-                country = country_buckets[0]["key"] if country_buckets else "Unknown"
-                
-                if ip not in attackers:
-                    attackers[ip] = {
-                        "ip": ip,
-                        "country": country,
-                        "total_events": 0,
-                        "honeypots": [],
-                        "first_seen": bucket["first_seen"]["value_as_string"],
-                        "last_seen": bucket["last_seen"]["value_as_string"],
-                    }
-                
-                attackers[ip]["total_events"] += bucket["doc_count"]
-                attackers[ip]["honeypots"].append(honeypot)
-                
-                # Update first/last seen
-                if bucket["first_seen"]["value_as_string"] < attackers[ip]["first_seen"]:
-                    attackers[ip]["first_seen"] = bucket["first_seen"]["value_as_string"]
-                if bucket["last_seen"]["value_as_string"] > attackers[ip]["last_seen"]:
-                    attackers[ip]["last_seen"] = bucket["last_seen"]["value_as_string"]
+                    )
                     
-        except Exception as e:
-            print(f"Error fetching {honeypot}: {e}")
-            continue
+                    buckets = result.get("aggregations", {}).get("top_ips", {}).get("buckets", [])
+                    if not buckets:
+                        continue  # Try next field combination
+                    
+                    got_results = True
+                    for bucket in buckets:
+                        ip = bucket["key"]
+                        country_buckets = bucket.get("country", {}).get("buckets", [])
+                        country = country_buckets[0]["key"] if country_buckets else "Unknown"
+                        
+                        if ip not in attackers:
+                            attackers[ip] = {
+                                "ip": ip,
+                                "country": country,
+                                "total_events": 0,
+                                "honeypots": [],
+                                "first_seen": bucket["first_seen"]["value_as_string"],
+                                "last_seen": bucket["last_seen"]["value_as_string"],
+                            }
+                        
+                        attackers[ip]["total_events"] += bucket["doc_count"]
+                        if honeypot not in attackers[ip]["honeypots"]:
+                            attackers[ip]["honeypots"].append(honeypot)
+                        
+                        # Update first/last seen
+                        if bucket["first_seen"]["value_as_string"] < attackers[ip]["first_seen"]:
+                            attackers[ip]["first_seen"] = bucket["first_seen"]["value_as_string"]
+                        if bucket["last_seen"]["value_as_string"] > attackers[ip]["last_seen"]:
+                            attackers[ip]["last_seen"] = bucket["last_seen"]["value_as_string"]
+                    break  # Success, exit ip_field loop
+                            
+                except Exception as e:
+                    # Try next field combination
+                    continue
     
     # Sort and limit
+    total_unique_attackers = len(attackers)
     sorted_attackers = sorted(attackers.values(), key=lambda x: -x["total_events"])[:limit]
     
     return {
         "time_range": time_range,
         "attackers": sorted_attackers,
-        "total": len(sorted_attackers)
+        "total": total_unique_attackers
     }

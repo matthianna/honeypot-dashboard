@@ -1,6 +1,6 @@
 """RDPY RDP honeypot API routes."""
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query
 
 from app.auth.jwt import get_current_user
@@ -19,6 +19,12 @@ from app.models.schemas import (
 
 router = APIRouter()
 INDEX = ".ds-rdpy-*"
+
+# Noise exclusion filter - exclude debug/info messages
+RDPY_NOISE_EXCLUSION: List[Dict[str, Any]] = [
+    {"match_phrase": {"message": "[*] INFO:"}},
+    {"prefix": {"message": "[*] INFO:"}},
+]
 
 
 @router.get("/stats", response_model=StatsResponse)
@@ -107,7 +113,7 @@ async def get_rdpy_sessions(
     """Get RDPY sessions."""
     es = get_es_service()
     
-    # Get sessions with connection events
+    # Get sessions with connection events, excluding noise
     result = await es.search(
         index=INDEX,
         query={
@@ -115,7 +121,8 @@ async def get_rdpy_sessions(
                 "must": [
                     es._get_time_range_query(time_range),
                     {"exists": {"field": "source.ip"}}
-                ]
+                ],
+                "must_not": RDPY_NOISE_EXCLUSION
             }
         },
         size=limit,
@@ -159,7 +166,7 @@ async def get_rdpy_credentials(
     import re
     es = get_es_service()
     
-    # Search for messages containing username/password
+    # Search for messages containing username/password, excluding noise
     result = await es.search(
         index=INDEX,
         query={
@@ -167,7 +174,8 @@ async def get_rdpy_credentials(
                 "must": [
                     es._get_time_range_query(time_range),
                     {"wildcard": {"message": "*username:*"}}
-                ]
+                ],
+                "must_not": RDPY_NOISE_EXCLUSION
             }
         },
         size=500,
@@ -216,14 +224,39 @@ async def get_rdpy_logs(
     search: Optional[str] = Query(default=None),
     _: str = Depends(get_current_user)
 ):
-    """Get RDPY logs with filtering options."""
+    """Get RDPY logs with filtering options (excludes INFO noise)."""
     es = get_es_service()
     
-    filters = {}
+    # Build query with noise exclusion
+    must_clauses = [es._get_time_range_query(time_range)]
     if src_ip:
-        filters["source.ip"] = src_ip
+        must_clauses.append({"term": {"source.ip": src_ip}})
+    if search:
+        must_clauses.append({"wildcard": {"message": f"*{search}*"}})
     
-    return await es.get_logs(INDEX, time_range, limit, search, filters)
+    result = await es.search(
+        index=INDEX,
+        query={
+            "bool": {
+                "must": must_clauses,
+                "must_not": RDPY_NOISE_EXCLUSION
+            }
+        },
+        size=limit,
+        sort=[{"@timestamp": "desc"}]
+    )
+    
+    logs = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit["_source"]
+        logs.append({
+            "timestamp": source.get("@timestamp"),
+            "message": source.get("message"),
+            "src_ip": source.get("source", {}).get("ip"),
+            "country": source.get("source", {}).get("geo", {}).get("country_name"),
+        })
+    
+    return {"total": result.get("hits", {}).get("total", {}).get("value", 0), "logs": logs}
 
 
 @router.get("/heatmap")
@@ -247,10 +280,15 @@ async def get_rdpy_connection_patterns(
     """Get RDP connection pattern analysis."""
     es = get_es_service()
     
-    # Get connection counts per IP
+    # Get connection counts per IP, excluding noise
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query={
+            "bool": {
+                "must": [es._get_time_range_query(time_range)],
+                "must_not": RDPY_NOISE_EXCLUSION
+            }
+        },
         size=0,
         aggs={
             "by_ip": {
@@ -327,7 +365,12 @@ async def get_rdpy_attack_velocity(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query={
+            "bool": {
+                "must": [es._get_time_range_query(time_range)],
+                "must_not": RDPY_NOISE_EXCLUSION
+            }
+        },
         size=0,
         aggs={
             "velocity": {
@@ -376,7 +419,7 @@ async def get_rdpy_username_analysis(
     import re
     es = get_es_service()
     
-    # Get credential messages
+    # Get credential messages, excluding noise
     result = await es.search(
         index=INDEX,
         query={
@@ -384,7 +427,8 @@ async def get_rdpy_username_analysis(
                 "must": [
                     es._get_time_range_query(time_range),
                     {"wildcard": {"message": "*username:*"}}
-                ]
+                ],
+                "must_not": RDPY_NOISE_EXCLUSION
             }
         },
         size=1000,
@@ -472,7 +516,8 @@ async def get_rdpy_domain_analysis(
                 "must": [
                     es._get_time_range_query(time_range),
                     {"wildcard": {"message": "*domain:*"}}
-                ]
+                ],
+                "must_not": RDPY_NOISE_EXCLUSION
             }
         },
         size=1000,
@@ -539,7 +584,12 @@ async def get_rdpy_hourly_heatmap(
     
     result = await es.search(
         index=INDEX,
-        query=es._get_time_range_query(time_range),
+        query={
+            "bool": {
+                "must": [es._get_time_range_query(time_range)],
+                "must_not": RDPY_NOISE_EXCLUSION
+            }
+        },
         size=0,
         aggs={
             "by_hour": {

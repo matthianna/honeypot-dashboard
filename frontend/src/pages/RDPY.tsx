@@ -1,5 +1,5 @@
-import { useCallback, useMemo } from 'react';
-import { BarChart2, Clock, Map, Monitor, Key, TrendingUp, Users, Activity, Shield, Globe } from 'lucide-react';
+import { useCallback } from 'react';
+import { BarChart2, Clock, Map, Monitor, Key, TrendingUp, Users, Activity, Info, Globe } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -25,6 +25,7 @@ import DataTable from '../components/DataTable';
 import IPLink from '../components/IPLink';
 import LoadingSpinner from '../components/LoadingSpinner';
 import HoneypotPorts from '../components/HoneypotPorts';
+import HoneypotMap from '../components/HoneypotMap';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
 import api from '../services/api';
@@ -69,31 +70,6 @@ export default function RDPY() {
     useCallback(() => api.getRDPYAttackVelocity(timeRange), [timeRange]),
     [timeRange]
   );
-
-  const { data: usernameAnalysis, loading: usernameAnalysisLoading } = useApiWithRefresh(
-    useCallback(() => api.getRDPYUsernameAnalysis(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: domainAnalysis, loading: domainAnalysisLoading } = useApiWithRefresh(
-    useCallback(() => api.getRDPYDomainAnalysis(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: hourlyHeatmap, loading: hourlyHeatmapLoading } = useApiWithRefresh(
-    useCallback(() => api.getRDPYHourlyHeatmap(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  // Process heatmap data for visualization
-  const heatmapGrid = useMemo(() => {
-    if (!hourlyHeatmap?.heatmap) return [];
-    const maxCount = Math.max(...hourlyHeatmap.heatmap.map(h => h.count), 1);
-    return hourlyHeatmap.heatmap.map(h => ({
-      ...h,
-      intensity: h.count / maxCount,
-    }));
-  }, [hourlyHeatmap]);
 
   const formatTimestamp = (timestamp: string) => {
     try {
@@ -170,6 +146,19 @@ export default function RDPY() {
       icon: <BarChart2 className="w-4 h-4" />,
       content: (
         <div className="space-y-6">
+          {/* Info Banner */}
+          <div className="flex items-start gap-3 p-4 bg-neon-purple/10 border border-neon-purple/30 rounded-lg">
+            <Info className="w-5 h-5 text-neon-purple flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm text-text-primary">
+                <strong>Note:</strong> RDPY captures connection attempts and metadata. Credentials may be limited depending on how far attackers progress in the RDP handshake.
+              </p>
+              <p className="text-xs text-text-secondary mt-1">
+                This honeypot logs connection sources, usernames, and domains when available.
+              </p>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
             <StatsCard title="Total Connections" value={stats?.total_events || 0} color="purple" loading={statsLoading} />
             <StatsCard title="Unique Attackers" value={stats?.unique_ips || 0} color="blue" loading={statsLoading} />
@@ -210,6 +199,32 @@ export default function RDPY() {
               <DataTable columns={sessionColumns} data={sessions || []} loading={sessionsLoading} emptyMessage="No RDP sessions found" />
             </CardContent>
           </Card>
+
+          {/* Top 5 Attack Countries */}
+          <Card>
+            <CardHeader 
+              title="Top Attack Countries" 
+              subtitle={`${geo?.data?.length || 0} countries total`}
+              icon={<Globe className="w-5 h-5" />}
+            />
+            <CardContent>
+              {geoLoading ? (
+                <div className="h-32 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {geo?.data?.slice(0, 5).map((item: GeoPoint, index: number) => (
+                    <div key={item.country} className="bg-bg-secondary rounded-lg p-3 text-center hover:bg-bg-hover transition-colors">
+                      <div className="flex items-center justify-center gap-2 mb-1">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                        <span className="font-medium text-text-primary text-sm truncate">{item.country}</span>
+                      </div>
+                      <div className="text-lg font-mono font-bold text-neon-purple">{item.count.toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       ),
     },
@@ -218,13 +233,29 @@ export default function RDPY() {
       label: 'Credentials',
       icon: <Key className="w-4 h-4" />,
       content: (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <Card>
-            <CardHeader title="Top Credentials" />
-            <CardContent className="p-0">
-              <DataTable columns={credentialColumns} data={credentials || []} loading={credentialsLoading} emptyMessage="No credentials found" />
-            </CardContent>
-          </Card>
+        <div className="space-y-6">
+          {/* Info Banner */}
+          {(!credentials || credentials.length === 0) && !credentialsLoading && (
+            <div className="flex items-start gap-3 p-4 bg-neon-blue/10 border border-neon-blue/30 rounded-lg">
+              <Info className="w-5 h-5 text-neon-blue flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm text-text-primary">
+                  <strong>Limited Credential Data</strong>
+                </p>
+                <p className="text-xs text-text-secondary mt-1">
+                  RDPY primarily captures connection metadata. Full credential capture requires attackers to progress through the complete RDP authentication handshake, which many automated scanners do not complete.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader title="Top Credentials" />
+              <CardContent className="p-0">
+                <DataTable columns={credentialColumns} data={credentials || []} loading={credentialsLoading} emptyMessage="No credentials captured yet" />
+              </CardContent>
+            </Card>
 
           <Card>
             <CardHeader title="Username Distribution" />
@@ -246,294 +277,41 @@ export default function RDPY() {
               )}
             </CardContent>
           </Card>
-        </div>
-      ),
-    },
-    {
-      id: 'username-analysis',
-      label: 'Username Categories',
-      icon: <Shield className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* Summary Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {usernameAnalysisLoading ? (
-              <div className="col-span-4 h-24 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-blue">{usernameAnalysis?.total_attempts?.toLocaleString() || 0}</div>
-                  <div className="text-xs text-text-secondary mt-1">Total Attempts</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-green">{usernameAnalysis?.unique_usernames || 0}</div>
-                  <div className="text-xs text-text-secondary mt-1">Unique Usernames</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-red">{usernameAnalysis?.categories?.admin?.percentage || 0}%</div>
-                  <div className="text-xs text-text-secondary mt-1">Admin Accounts</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-orange">{usernameAnalysis?.categories?.service?.percentage || 0}%</div>
-                  <div className="text-xs text-text-secondary mt-1">Service Accounts</div>
-                </div>
-              </>
-            )}
           </div>
-
-          {/* Category Distribution Chart */}
-          <Card>
-            <CardHeader title="Username Category Distribution" subtitle="Types of accounts targeted" icon={<Users className="w-5 h-5" />} />
-            <CardContent>
-              {usernameAnalysisLoading ? (
-                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={[
-                          { name: 'Admin', value: usernameAnalysis?.categories?.admin?.count || 0, fill: '#ff3366' },
-                          { name: 'Default', value: usernameAnalysis?.categories?.default?.count || 0, fill: '#39ff14' },
-                          { name: 'Service', value: usernameAnalysis?.categories?.service?.count || 0, fill: '#00d4ff' },
-                          { name: 'Domain', value: usernameAnalysis?.categories?.domain?.count || 0, fill: '#ff6600' },
-                          { name: 'Personal', value: usernameAnalysis?.categories?.personal?.count || 0, fill: '#bf00ff' },
-                        ].filter(d => d.value > 0)}
-                        dataKey="value"
-                        nameKey="name"
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={40}
-                        outerRadius={80}
-                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                      />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
-                        formatter={(value: number) => [value.toLocaleString(), 'Attempts']}
-                      />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Top Usernames by Category */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* Admin Accounts */}
-            <Card>
-              <CardHeader title="Admin Accounts" subtitle="Privileged account attempts" />
-              <CardContent>
-                {usernameAnalysisLoading ? (
-                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {usernameAnalysis?.categories?.admin?.top_usernames?.map((u, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded">
-                        <code className="text-sm text-neon-red font-mono">{u.username}</code>
-                        <span className="text-xs text-text-secondary">{u.count}</span>
-                      </div>
-                    ))}
-                    {(!usernameAnalysis?.categories?.admin?.top_usernames?.length) && (
-                      <p className="text-text-muted text-center py-2">No admin accounts detected</p>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Service Accounts */}
-            <Card>
-              <CardHeader title="Service Accounts" subtitle="System/service accounts" />
-              <CardContent>
-                {usernameAnalysisLoading ? (
-                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {usernameAnalysis?.categories?.service?.top_usernames?.map((u, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded">
-                        <code className="text-sm text-neon-blue font-mono">{u.username}</code>
-                        <span className="text-xs text-text-secondary">{u.count}</span>
-                      </div>
-                    ))}
-                    {(!usernameAnalysis?.categories?.service?.top_usernames?.length) && (
-                      <p className="text-text-muted text-center py-2">No service accounts detected</p>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Default/Test Accounts */}
-            <Card>
-              <CardHeader title="Default Accounts" subtitle="Common test/guest accounts" />
-              <CardContent>
-                {usernameAnalysisLoading ? (
-                  <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {usernameAnalysis?.categories?.default?.top_usernames?.map((u, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2 bg-bg-secondary rounded">
-                        <code className="text-sm text-neon-green font-mono">{u.username}</code>
-                        <span className="text-xs text-text-secondary">{u.count}</span>
-                      </div>
-                    ))}
-                    {(!usernameAnalysis?.categories?.default?.top_usernames?.length) && (
-                      <p className="text-text-muted text-center py-2">No default accounts detected</p>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-      ),
-    },
-    {
-      id: 'domain-analysis',
-      label: 'Domain Analysis',
-      icon: <Globe className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* Summary Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {domainAnalysisLoading ? (
-              <div className="col-span-4 h-24 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-blue">{domainAnalysis?.total_with_domain?.toLocaleString() || 0}</div>
-                  <div className="text-xs text-text-secondary mt-1">Attempts with Domain</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-green">{domainAnalysis?.unique_domains || 0}</div>
-                  <div className="text-xs text-text-secondary mt-1">Unique Domains</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-lg font-bold text-neon-purple truncate">{domainAnalysis?.summary?.most_targeted_domain || 'N/A'}</div>
-                  <div className="text-xs text-text-secondary mt-1">Top Domain</div>
-                </div>
-                <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
-                  <div className="text-2xl font-bold text-neon-orange">{domainAnalysis?.enterprise_domains?.length || 0}</div>
-                  <div className="text-xs text-text-secondary mt-1">Enterprise Domains</div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Domain Table */}
-          <Card>
-            <CardHeader title="Windows Domains Attempted" subtitle="Domains used in RDP attacks" icon={<Globe className="w-5 h-5" />} />
-            <CardContent>
-              {domainAnalysisLoading ? (
-                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-bg-hover">
-                    <thead className="bg-bg-card">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Domain</th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Attempts</th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-text-secondary uppercase">Unique Users</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-text-secondary uppercase">Sample Usernames</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-bg-hover/50">
-                      {domainAnalysis?.domains?.slice(0, 20).map((domain, idx) => (
-                        <tr key={idx} className="hover:bg-bg-secondary transition-colors">
-                          <td className="px-4 py-2 font-mono text-neon-purple">{domain.domain || '(empty)'}</td>
-                          <td className="px-4 py-2 text-right font-mono text-neon-green">{domain.attempt_count.toLocaleString()}</td>
-                          <td className="px-4 py-2 text-right text-text-secondary">{domain.unique_usernames}</td>
-                          <td className="px-4 py-2">
-                            <div className="flex gap-1 flex-wrap">
-                              {domain.sample_usernames.slice(0, 3).map((u, i) => (
-                                <span key={i} className="px-2 py-0.5 text-xs bg-bg-secondary text-text-secondary rounded">{u}</span>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Session Heatmap */}
-          <Card>
-            <CardHeader 
-              title="Attack Pattern Heatmap" 
-              subtitle={`Peak: ${hourlyHeatmap?.peak_day || 'N/A'} at ${hourlyHeatmap?.peak_hour || 0}:00 (${hourlyHeatmap?.peak_count || 0} attacks)`}
-              icon={<Clock className="w-5 h-5" />} 
-            />
-            <CardContent>
-              {hourlyHeatmapLoading ? (
-                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <div className="min-w-[600px]">
-                    {/* Hours header */}
-                    <div className="flex gap-1 mb-1 ml-20">
-                      {Array.from({ length: 24 }, (_, i) => (
-                        <div key={i} className="w-5 text-center text-xs text-text-muted">{i}</div>
-                      ))}
-                    </div>
-                    {/* Days */}
-                    {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map((day, dayIdx) => (
-                      <div key={day} className="flex items-center gap-1 mb-1">
-                        <div className="w-20 text-xs text-text-secondary text-right pr-2">{day.slice(0, 3)}</div>
-                        {Array.from({ length: 24 }, (_, hour) => {
-                          const cell = heatmapGrid.find(h => h.day_index === dayIdx && h.hour === hour);
-                          const intensity = cell?.intensity || 0;
-                          const bgColor = intensity === 0 
-                            ? 'bg-bg-secondary' 
-                            : `bg-neon-purple`;
-                          return (
-                            <div 
-                              key={hour} 
-                              className={`w-5 h-5 rounded-sm ${bgColor} transition-opacity`}
-                              style={{ opacity: intensity === 0 ? 0.3 : 0.3 + (intensity * 0.7) }}
-                              title={`${day} ${hour}:00 - ${cell?.count || 0} attacks`}
-                            />
-                          );
-                        })}
-                      </div>
-                    ))}
-                    {/* Legend */}
-                    <div className="flex items-center gap-2 mt-4 justify-center text-xs text-text-muted">
-                      <span>Less</span>
-                      <div className="w-4 h-4 bg-neon-purple opacity-30 rounded-sm" />
-                      <div className="w-4 h-4 bg-neon-purple opacity-50 rounded-sm" />
-                      <div className="w-4 h-4 bg-neon-purple opacity-70 rounded-sm" />
-                      <div className="w-4 h-4 bg-neon-purple opacity-100 rounded-sm" />
-                      <span>More</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
       ),
     },
     {
       id: 'map',
-      label: 'Geographic',
+      label: 'Attack Map',
       icon: <Map className="w-4 h-4" />,
       content: (
-        <Card>
-          <CardHeader title="Connection Origins" />
-          <CardContent>
-            {geoLoading ? (
-              <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          <HoneypotMap
+            data={geo?.data?.map((g: GeoPoint) => ({ country: g.country, count: g.count })) || []}
+            title="RDP Attack Origins"
+            height="450px"
+            accentColor="#bf00ff"
+            loading={geoLoading}
+          />
+          
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Pie Chart */}
+            <Card>
+              <CardHeader title="Top Countries Distribution" subtitle="Attack share by country" />
+              <CardContent>
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
-                      <Pie data={geo?.data?.slice(0, 6) || []} dataKey="count" nameKey="country" cx="50%" cy="50%" outerRadius={80} label>
+                      <Pie 
+                        data={geo?.data?.slice(0, 6) || []} 
+                        dataKey="count" 
+                        nameKey="country" 
+                        cx="50%" 
+                        cy="50%" 
+                        outerRadius={80} 
+                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                      >
                         {geo?.data?.slice(0, 6).map((_, index) => (
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
@@ -542,21 +320,28 @@ export default function RDPY() {
                     </PieChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="space-y-2">
+              </CardContent>
+            </Card>
+
+            {/* Country List */}
+            <Card>
+              <CardHeader title="Attack Countries" subtitle={`${geo?.data?.length || 0} countries detected`} />
+              <CardContent>
+                <div className="space-y-2 max-h-64 overflow-y-auto">
                   {geo?.data?.slice(0, 12).map((item: GeoPoint, index: number) => (
-                    <div key={item.country} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                      <div className="flex items-center">
-                        <div className="w-3 h-3 rounded-full mr-3" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                        <span className="text-text-primary">{item.country}</span>
+                    <div key={item.country} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg hover:bg-bg-hover transition-colors">
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                        <span className="text-text-primary font-medium">{item.country}</span>
                       </div>
                       <span className="font-mono text-neon-purple">{item.count.toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       ),
     },
     {

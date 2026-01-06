@@ -26,7 +26,7 @@ IP_FIELDS = {
     "galah": "source.ip",
     "rdpy": "source.ip",
     "heralding": "source.ip",
-    "firewall": "source.ip",
+    "firewall": "fw.src_ip",  # Firewall uses fw.* fields
 }
 
 GEO_FIELDS = {
@@ -37,6 +37,65 @@ GEO_FIELDS = {
     "heralding": "source.geo.country_name",
     "firewall": "source.geo.country_name",
 }
+
+# Firewall logs have a 1-hour offset (stored in local time but marked as UTC)
+FIREWALL_TIMEZONE_OFFSET_HOURS = 1
+
+
+def get_firewall_time_range_query(time_range: str) -> dict:
+    """
+    Get time range query adjusted for firewall's 1-hour timestamp offset.
+    
+    Firewall logs are stored with timestamps 1 hour behind actual time.
+    To query "last 1 hour" of actual events, we need to look for timestamps
+    from 2 hours ago to 1 hour ago.
+    """
+    time_ranges = {
+        "1h": timedelta(hours=1),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    
+    delta = time_ranges.get(time_range, timedelta(hours=24))
+    now = datetime.utcnow()
+    
+    # Shift the time window back by 1 hour to account for offset
+    offset = timedelta(hours=FIREWALL_TIMEZONE_OFFSET_HOURS)
+    
+    return {
+        "range": {
+            "@timestamp": {
+                "gte": (now - delta - offset).isoformat() + "Z",
+                "lte": now.isoformat() + "Z"
+            }
+        }
+    }
+
+
+def build_firewall_filter_query(
+    time_range: str,
+    direction: str = "all",
+    src_ip: Optional[str] = None,
+    country: Optional[str] = None,
+    dst_port: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build Elasticsearch query for firewall with timezone offset adjustment."""
+    must_clauses = [get_firewall_time_range_query(time_range)]
+    
+    if direction != "all":
+        must_clauses.append({"term": {"fw.dir": direction}})
+    
+    if src_ip:
+        must_clauses.append({"term": {"fw.src_ip": src_ip}})
+    
+    if country:
+        must_clauses.append({"term": {"source.geo.country_name": country}})
+    
+    if dst_port:
+        must_clauses.append({"term": {"fw.dst_port": dst_port}})
+    
+    return {"bool": {"must": must_clauses}}
 
 
 def build_filter_query(
@@ -110,17 +169,36 @@ async def get_analytics_overview(
             continue
         
         try:
-            query = build_filter_query(time_range, honeypot=hp_name, protocol=protocol, country=country, src_ip=src_ip, ai_variant=ai_variant)
+            # Use firewall-specific query for firewall index (with 1h timezone offset)
+            if hp_name == "firewall":
+                query = build_firewall_filter_query(time_range, direction="in", src_ip=src_ip, country=country)
+            else:
+                query = build_filter_query(time_range, honeypot=hp_name, protocol=protocol, country=country, src_ip=src_ip, ai_variant=ai_variant)
             
-            aggs = {
-                "unique_ips": {"cardinality": {"field": IP_FIELDS.get(hp_name, "source.ip")}},
-            }
+            # For Cowrie, support both old (json.src_ip) and new (cowrie.src_ip) field structures
+            if hp_name == "cowrie":
+                aggs = {
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
+                }
+            else:
+                aggs = {
+                    "unique_ips": {"cardinality": {"field": IP_FIELDS.get(hp_name, "source.ip")}},
+                }
             
             # Add honeypot-specific aggregations
             if hp_name == "cowrie":
-                aggs["sessions"] = {"cardinality": {"field": "json.session"}}
-                aggs["login_success"] = {"filter": {"term": {"json.eventid": "cowrie.login.success"}}}
-                aggs["login_failed"] = {"filter": {"term": {"json.eventid": "cowrie.login.failed"}}}
+                # Support both old (json.*) and new (cowrie.*) field structures
+                aggs["sessions_old"] = {"cardinality": {"field": "json.session"}}
+                aggs["sessions_new"] = {"cardinality": {"field": "cowrie.session"}}
+                aggs["login_success"] = {"filter": {"bool": {"should": [
+                    {"term": {"json.eventid": "cowrie.login.success"}},
+                    {"term": {"cowrie.eventid": "cowrie.login.success"}}
+                ], "minimum_should_match": 1}}}
+                aggs["login_failed"] = {"filter": {"bool": {"should": [
+                    {"term": {"json.eventid": "cowrie.login.failed"}},
+                    {"term": {"cowrie.eventid": "cowrie.login.failed"}}
+                ], "minimum_should_match": 1}}}
             elif hp_name == "heralding":
                 aggs["auth_attempts"] = {"sum": {"field": "num_auth_attempts"}}
             elif hp_name == "galah":
@@ -129,13 +207,22 @@ async def get_analytics_overview(
             result = await es.search(index=index, query=query, size=0, aggs=aggs)
             
             events = result.get("hits", {}).get("total", {}).get("value", 0)
-            unique_ips = result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
+            
+            # For Cowrie, combine both field aggregations
+            if hp_name == "cowrie":
+                unique_ips_old = result.get("aggregations", {}).get("unique_ips_old", {}).get("value", 0)
+                unique_ips_new = result.get("aggregations", {}).get("unique_ips_new", {}).get("value", 0)
+                unique_ips = max(unique_ips_old, unique_ips_new)
+            else:
+                unique_ips = result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
             
             kpis["total_events"] += events
             kpis["unique_ips"] += unique_ips
             
             if hp_name == "cowrie":
-                sessions = result.get("aggregations", {}).get("sessions", {}).get("value", 0)
+                sessions_old = result.get("aggregations", {}).get("sessions_old", {}).get("value", 0)
+                sessions_new = result.get("aggregations", {}).get("sessions_new", {}).get("value", 0)
+                sessions = max(sessions_old, sessions_new)  # Use whichever has more data
                 login_success = result.get("aggregations", {}).get("login_success", {}).get("doc_count", 0)
                 login_failed = result.get("aggregations", {}).get("login_failed", {}).get("doc_count", 0)
                 kpis["total_sessions"] += sessions
@@ -236,57 +323,62 @@ async def get_analytics_top_attackers(
         if honeypot and hp_name != honeypot:
             continue
         
-        ip_field = IP_FIELDS.get(hp_name, "source.ip")
+        # For Cowrie, we need to query both old (json.src_ip) and new (cowrie.src_ip) fields
+        if hp_name == "cowrie":
+            ip_fields = ["json.src_ip", "cowrie.src_ip"]
+        else:
+            ip_fields = [IP_FIELDS.get(hp_name, "source.ip")]
         
-        try:
-            result = await es.search(
-                index=index,
-                query=es._get_time_range_query(time_range),
-                size=0,
-                aggs={
-                    "top_ips": {
-                        "terms": {"field": ip_field, "size": 100},
-                        "aggs": {
-                            "geo": {
-                                "top_hits": {
-                                    "size": 1,
-                                    "_source": ["source.geo.country_name", "source.geo.city_name", "geoip.country_name"]
-                                }
-                            },
-                            "first_seen": {"min": {"field": "@timestamp"}},
-                            "last_seen": {"max": {"field": "@timestamp"}},
+        for ip_field in ip_fields:
+            try:
+                result = await es.search(
+                    index=index,
+                    query=es._get_time_range_query(time_range),
+                    size=0,
+                    aggs={
+                        "top_ips": {
+                            "terms": {"field": ip_field, "size": 100},
+                            "aggs": {
+                                "geo": {
+                                    "top_hits": {
+                                        "size": 1,
+                                        "_source": ["source.geo.country_name", "source.geo.city_name", "geoip.country_name"]
+                                    }
+                                },
+                                "first_seen": {"min": {"field": "@timestamp"}},
+                                "last_seen": {"max": {"field": "@timestamp"}},
+                            }
                         }
                     }
-                }
-            )
-            
-            for bucket in result.get("aggregations", {}).get("top_ips", {}).get("buckets", []):
-                ip = bucket["key"]
-                if ip.startswith(("192.168.", "10.", "172.16.", "172.17.", "172.18.", "127.")):
-                    continue
+                )
                 
-                if ip not in ip_data:
-                    hits = bucket.get("geo", {}).get("hits", {}).get("hits", [])
-                    geo = {}
-                    if hits:
-                        source = hits[0].get("_source", {})
-                        geo = source.get("source", {}).get("geo", source.get("geoip", {}))
+                for bucket in result.get("aggregations", {}).get("top_ips", {}).get("buckets", []):
+                    ip = bucket["key"]
+                    if ip.startswith(("192.168.", "10.", "172.16.", "172.17.", "172.18.", "127.")):
+                        continue
                     
-                    ip_data[ip] = {
-                        "ip": ip,
-                        "events": 0,
-                        "honeypots": [],
-                        "country": geo.get("country_name"),
-                        "city": geo.get("city_name"),
-                        "first_seen": bucket.get("first_seen", {}).get("value_as_string"),
-                        "last_seen": bucket.get("last_seen", {}).get("value_as_string"),
-                    }
-                
-                ip_data[ip]["events"] += bucket["doc_count"]
-                if hp_name not in ip_data[ip]["honeypots"]:
-                    ip_data[ip]["honeypots"].append(hp_name)
-        except Exception:
-            pass
+                    if ip not in ip_data:
+                        hits = bucket.get("geo", {}).get("hits", {}).get("hits", [])
+                        geo = {}
+                        if hits:
+                            source = hits[0].get("_source", {})
+                            geo = source.get("source", {}).get("geo", source.get("geoip", {}))
+                        
+                        ip_data[ip] = {
+                            "ip": ip,
+                            "events": 0,
+                            "honeypots": [],
+                            "country": geo.get("country_name"),
+                            "city": geo.get("city_name"),
+                            "first_seen": bucket.get("first_seen", {}).get("value_as_string"),
+                            "last_seen": bucket.get("last_seen", {}).get("value_as_string"),
+                        }
+                    
+                    ip_data[ip]["events"] += bucket["doc_count"]
+                    if hp_name not in ip_data[ip]["honeypots"]:
+                        ip_data[ip]["honeypots"].append(hp_name)
+            except Exception:
+                pass
     
     # Sort by events and return top N
     attackers = sorted(ip_data.values(), key=lambda x: -x["events"])[:limit]
@@ -638,12 +730,21 @@ async def get_event_detail(
     es = get_es_service()
     
     try:
-        result = await es.es.get(index=index, id=event_id)
-        return {
-            "id": result["_id"],
-            "index": result["_index"],
-            "source": result["_source"],
-        }
+        # Use search with ids query for data stream compatibility
+        result = await es.search(
+            index=index,
+            query={"ids": {"values": [event_id]}},
+            size=1
+        )
+        hits = result.get("hits", {}).get("hits", [])
+        if hits:
+            hit = hits[0]
+            return {
+                "id": hit["_id"],
+                "index": hit["_index"],
+                "source": hit["_source"],
+            }
+        return {"error": "Event not found"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -662,31 +763,37 @@ async def get_top_credentials(
     usernames = {}
     passwords = {}
     
-    # Cowrie credentials
-    try:
-        result = await es.search(
-            index=INDICES["cowrie"],
-            query={
-                "bool": {
-                    "must": [
-                        es._get_time_range_query(time_range),
-                        {"terms": {"json.eventid": ["cowrie.login.success", "cowrie.login.failed"]}}
-                    ]
+    # Cowrie credentials (support both old json.* and new cowrie.* fields)
+    field_configs = [
+        {"eventid": "json.eventid", "username": "json.username", "password": "json.password"},
+        {"eventid": "cowrie.eventid", "username": "cowrie.username", "password": "cowrie.password"},
+    ]
+    
+    for fields in field_configs:
+        try:
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query={
+                    "bool": {
+                        "must": [
+                            es._get_time_range_query(time_range),
+                            {"terms": {fields["eventid"]: ["cowrie.login.success", "cowrie.login.failed"]}}
+                        ]
+                    }
+                },
+                size=0,
+                aggs={
+                    "usernames": {"terms": {"field": fields["username"], "size": limit}},
+                    "passwords": {"terms": {"field": fields["password"], "size": limit}},
                 }
-            },
-            size=0,
-            aggs={
-                "usernames": {"terms": {"field": "json.username", "size": limit}},
-                "passwords": {"terms": {"field": "json.password", "size": limit}},
-            }
-        )
-        
-        for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
-            usernames[bucket["key"]] = usernames.get(bucket["key"], 0) + bucket["doc_count"]
-        for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
-            passwords[bucket["key"]] = passwords.get(bucket["key"], 0) + bucket["doc_count"]
-    except Exception:
-        pass
+            )
+            
+            for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
+                usernames[bucket["key"]] = usernames.get(bucket["key"], 0) + bucket["doc_count"]
+            for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
+                passwords[bucket["key"]] = passwords.get(bucket["key"], 0) + bucket["doc_count"]
+        except Exception:
+            pass
     
     # Heralding credentials
     try:
@@ -725,37 +832,43 @@ async def get_credential_pairs(
     
     pairs = {}
     
-    # Cowrie
-    try:
-        result = await es.search(
-            index=INDICES["cowrie"],
-            query={
-                "bool": {
-                    "must": [
-                        es._get_time_range_query(time_range),
-                        {"terms": {"json.eventid": ["cowrie.login.success", "cowrie.login.failed"]}}
-                    ]
-                }
-            },
-            size=0,
-            aggs={
-                "pairs": {
-                    "composite": {
-                        "size": 1000,
-                        "sources": [
-                            {"username": {"terms": {"field": "json.username"}}},
-                            {"password": {"terms": {"field": "json.password"}}}
+    # Cowrie (support both old json.* and new cowrie.* fields)
+    cowrie_field_configs = [
+        {"eventid": "json.eventid", "username": "json.username", "password": "json.password"},
+        {"eventid": "cowrie.eventid", "username": "cowrie.username", "password": "cowrie.password"},
+    ]
+    
+    for fields in cowrie_field_configs:
+        try:
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query={
+                    "bool": {
+                        "must": [
+                            es._get_time_range_query(time_range),
+                            {"terms": {fields["eventid"]: ["cowrie.login.success", "cowrie.login.failed"]}}
                         ]
                     }
+                },
+                size=0,
+                aggs={
+                    "pairs": {
+                        "composite": {
+                            "size": 1000,
+                            "sources": [
+                                {"username": {"terms": {"field": fields["username"]}}},
+                                {"password": {"terms": {"field": fields["password"]}}}
+                            ]
+                        }
+                    }
                 }
-            }
-        )
-        
-        for bucket in result.get("aggregations", {}).get("pairs", {}).get("buckets", []):
-            key = (bucket["key"]["username"], bucket["key"]["password"])
-            pairs[key] = pairs.get(key, 0) + bucket["doc_count"]
-    except Exception:
-        pass
+            )
+            
+            for bucket in result.get("aggregations", {}).get("pairs", {}).get("buckets", []):
+                key = (bucket["key"]["username"], bucket["key"]["password"])
+                pairs[key] = pairs.get(key, 0) + bucket["doc_count"]
+        except Exception:
+            pass
     
     sorted_pairs = sorted(pairs.items(), key=lambda x: -x[1])[:limit]
     
@@ -777,45 +890,51 @@ async def get_credential_reuse(
     """Analyze credential reuse patterns."""
     es = get_es_service()
     
-    # Passwords used by multiple IPs
+    # Passwords used by multiple IPs (support both old and new Cowrie fields)
     password_ips = {}
     username_ips = {}
     
-    try:
-        result = await es.search(
-            index=INDICES["cowrie"],
-            query={
-                "bool": {
-                    "must": [
-                        es._get_time_range_query(time_range),
-                        {"terms": {"json.eventid": ["cowrie.login.success", "cowrie.login.failed"]}}
-                    ]
-                }
-            },
-            size=0,
-            aggs={
-                "passwords": {
-                    "terms": {"field": "json.password", "size": 100},
-                    "aggs": {"unique_ips": {"cardinality": {"field": "json.src_ip"}}}
+    reuse_field_configs = [
+        {"eventid": "json.eventid", "password": "json.password", "username": "json.username", "src_ip": "json.src_ip"},
+        {"eventid": "cowrie.eventid", "password": "cowrie.password", "username": "cowrie.username", "src_ip": "cowrie.src_ip"},
+    ]
+    
+    for fields in reuse_field_configs:
+        try:
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query={
+                    "bool": {
+                        "must": [
+                            es._get_time_range_query(time_range),
+                            {"terms": {fields["eventid"]: ["cowrie.login.success", "cowrie.login.failed"]}}
+                        ]
+                    }
                 },
-                "usernames": {
-                    "terms": {"field": "json.username", "size": 100},
-                    "aggs": {"unique_ips": {"cardinality": {"field": "json.src_ip"}}}
+                size=0,
+                aggs={
+                    "passwords": {
+                        "terms": {"field": fields["password"], "size": 100},
+                        "aggs": {"unique_ips": {"cardinality": {"field": fields["src_ip"]}}}
+                    },
+                    "usernames": {
+                        "terms": {"field": fields["username"], "size": 100},
+                        "aggs": {"unique_ips": {"cardinality": {"field": fields["src_ip"]}}}
+                    }
                 }
-            }
-        )
-        
-        for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
-            ip_count = bucket.get("unique_ips", {}).get("value", 0)
-            if ip_count >= 2:
-                password_ips[bucket["key"]] = ip_count
-        
-        for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
-            ip_count = bucket.get("unique_ips", {}).get("value", 0)
-            if ip_count >= 2:
-                username_ips[bucket["key"]] = ip_count
-    except Exception:
-        pass
+            )
+            
+            for bucket in result.get("aggregations", {}).get("passwords", {}).get("buckets", []):
+                ip_count = bucket.get("unique_ips", {}).get("value", 0)
+                if ip_count >= 2:
+                    password_ips[bucket["key"]] = max(password_ips.get(bucket["key"], 0), ip_count)
+            
+            for bucket in result.get("aggregations", {}).get("usernames", {}).get("buckets", []):
+                ip_count = bucket.get("unique_ips", {}).get("value", 0)
+                if ip_count >= 2:
+                    username_ips[bucket["key"]] = max(username_ips.get(bucket["key"], 0), ip_count)
+        except Exception:
+            pass
     
     return {
         "reused_passwords": sorted(
@@ -836,38 +955,154 @@ async def get_credential_reuse(
 async def get_cowrie_sessions(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     variant: Optional[str] = None,
-    limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
+    has_commands: Optional[bool] = Query(default=None, description="Filter by command presence"),
     _: str = Depends(get_current_user)
 ):
-    """Get Cowrie session list."""
+    """Get Cowrie session list with optional filtering."""
     es = get_es_service()
     
-    query = {"bool": {"must": [es._get_time_range_query(time_range)]}}
-    
+    must_clauses = [es._get_time_range_query(time_range)]
     if variant:
-        query["bool"]["must"].append({"term": {"cowrie_variant": variant}})
+        must_clauses.append({"term": {"cowrie_variant": variant}})
     
-    result = await es.search(
-        index=INDICES["cowrie"],
-        query=query,
-        size=0,
-        aggs={
-            "sessions": {
-                "terms": {"field": "json.session", "size": limit},
-                "aggs": {
+    # If filtering for sessions WITH commands, first find those session IDs
+    target_session_ids = None
+    if has_commands is True:
+        cmd_query = {"bool": {"must": must_clauses + [
+            {"bool": {"should": [
+                {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                {"term": {"json.eventid": "cowrie.command.input"}}
+            ]}}
+        ]}}
+        
+        cmd_result = await es.search(
+            index=INDICES["cowrie"],
+            query=cmd_query,
+            size=0,
+            aggs={
+                "sessions_new": {"terms": {"field": "cowrie.session", "size": 1000}},
+                "sessions_old": {"terms": {"field": "json.session", "size": 1000}}
+            }
+        )
+        
+        target_session_ids = set()
+        for bucket in cmd_result.get("aggregations", {}).get("sessions_new", {}).get("buckets", []):
+            target_session_ids.add(bucket["key"])
+        for bucket in cmd_result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []):
+            target_session_ids.add(bucket["key"])
+        
+        if not target_session_ids:
+            return {"sessions": [], "total": 0, "time_range": time_range}
+        
+        # Query those specific sessions directly
+        sessions = []
+        for session_id in list(target_session_ids)[:limit]:
+            session_query = {"bool": {"must": [
+                es._get_time_range_query(time_range),
+                {"bool": {"should": [
+                    {"term": {"cowrie.session": session_id}},
+                    {"term": {"json.session": session_id}}
+                ]}}
+            ]}}
+            if variant:
+                session_query["bool"]["must"].append({"term": {"cowrie_variant": variant}})
+            
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query=session_query,
+                size=0,
+                aggs={
                     "variant": {"terms": {"field": "cowrie_variant", "size": 1}},
-                    "src_ip": {"terms": {"field": "json.src_ip", "size": 1}},
-                    "commands": {"filter": {"term": {"json.eventid": "cowrie.command.input"}}},
-                    "login_success": {"filter": {"term": {"json.eventid": "cowrie.login.success"}}},
+                    "src_ip": {"top_hits": {"size": 1, "_source": ["cowrie.src_ip", "json.src_ip"]}},
+                    "commands": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                        {"term": {"json.eventid": "cowrie.command.input"}}
+                    ]}}},
+                    "login_success": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.login.success"}},
+                        {"term": {"json.eventid": "cowrie.login.success"}}
+                    ]}}},
                     "first_event": {"min": {"field": "@timestamp"}},
                     "last_event": {"max": {"field": "@timestamp"}},
                 }
-            }
-        }
-    )
+            )
+            
+            if result.get("hits", {}).get("total", {}).get("value", 0) == 0:
+                continue
+            
+            aggs = result.get("aggregations", {})
+            variant_buckets = aggs.get("variant", {}).get("buckets", [])
+            hit_source = aggs.get("src_ip", {}).get("hits", {}).get("hits", [{}])[0].get("_source", {})
+            
+            first = aggs.get("first_event", {}).get("value_as_string")
+            last = aggs.get("last_event", {}).get("value_as_string")
+            duration = 0
+            if first and last:
+                try:
+                    first_dt = datetime.fromisoformat(first.replace("Z", "+00:00"))
+                    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                    duration = (last_dt - first_dt).total_seconds()
+                except Exception:
+                    pass
+            
+            sessions.append({
+                "session_id": session_id,
+                "variant": variant_buckets[0]["key"] if variant_buckets else None,
+                "src_ip": hit_source.get("cowrie", {}).get("src_ip") or hit_source.get("json", {}).get("src_ip"),
+                "events": result.get("hits", {}).get("total", {}).get("value", 0),
+                "commands": aggs.get("commands", {}).get("doc_count", 0),
+                "login_success": aggs.get("login_success", {}).get("doc_count", 0) > 0,
+                "duration": round(duration, 2),
+                "first_event": first,
+                "last_event": last,
+            })
+        
+        sessions.sort(key=lambda x: -x["duration"])
+        return {"sessions": sessions, "total": len(sessions), "time_range": time_range}
     
+    # Standard aggregation for all sessions or empty-only filter
+    query = {"bool": {"must": must_clauses}}
+    fetch_limit = limit * 3 if has_commands is False else limit
+    
+    all_sessions = []
+    
+    for session_field, ip_field, eventid_field in [
+        ("json.session", "json.src_ip", "json.eventid"),
+        ("cowrie.session", "cowrie.src_ip", "cowrie.eventid"),
+    ]:
+        result = await es.search(
+            index=INDICES["cowrie"],
+            query=query,
+            size=0,
+            aggs={
+                "sessions": {
+                    "terms": {"field": session_field, "size": fetch_limit},
+                    "aggs": {
+                        "variant": {"terms": {"field": "cowrie_variant", "size": 1}},
+                        "src_ip": {"terms": {"field": ip_field, "size": 1}},
+                        "commands": {"filter": {"term": {eventid_field: "cowrie.command.input"}}},
+                        "login_success": {"filter": {"term": {eventid_field: "cowrie.login.success"}}},
+                        "first_event": {"min": {"field": "@timestamp"}},
+                        "last_event": {"max": {"field": "@timestamp"}},
+                    }
+                }
+            }
+        )
+        
+        for bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+            all_sessions.append(bucket)
+    
+    # Deduplicate sessions by session_id (in case same session appears in both field queries)
+    seen_sessions = set()
     sessions = []
-    for bucket in result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+    
+    for bucket in all_sessions:
+        session_id = bucket["key"]
+        if session_id in seen_sessions:
+            continue
+        seen_sessions.add(session_id)
+        
         variant_buckets = bucket.get("variant", {}).get("buckets", [])
         ip_buckets = bucket.get("src_ip", {}).get("buckets", [])
         
@@ -882,20 +1117,30 @@ async def get_cowrie_sessions(
             except Exception:
                 pass
         
+        commands_count = bucket.get("commands", {}).get("doc_count", 0)
+        
+        # Apply has_commands filter
+        if has_commands is not None:
+            if has_commands and commands_count == 0:
+                continue
+            if not has_commands and commands_count > 0:
+                continue
+        
         sessions.append({
-            "session_id": bucket["key"],
+            "session_id": session_id,
             "variant": variant_buckets[0]["key"] if variant_buckets else None,
             "src_ip": ip_buckets[0]["key"] if ip_buckets else None,
             "events": bucket["doc_count"],
-            "commands": bucket.get("commands", {}).get("doc_count", 0),
+            "commands": commands_count,
             "login_success": bucket.get("login_success", {}).get("doc_count", 0) > 0,
             "duration": round(duration, 2),
             "first_event": first,
             "last_event": last,
         })
     
-    # Sort by duration desc
+    # Sort by duration desc and limit
     sessions.sort(key=lambda x: -x["duration"])
+    sessions = sessions[:limit]
     
     return {
         "sessions": sessions,
@@ -920,11 +1165,23 @@ async def get_cowrie_distributions(
             "by_variant": {
                 "terms": {"field": "cowrie_variant", "size": 10},
                 "aggs": {
-                    "sessions": {"cardinality": {"field": "json.session"}},
-                    "unique_ips": {"cardinality": {"field": "json.src_ip"}},
-                    "commands": {"filter": {"term": {"json.eventid": "cowrie.command.input"}}},
-                    "login_success": {"filter": {"term": {"json.eventid": "cowrie.login.success"}}},
-                    "login_failed": {"filter": {"term": {"json.eventid": "cowrie.login.failed"}}},
+                    # Support both old (json.*) and new (cowrie.*) field structures
+                    "sessions_old": {"cardinality": {"field": "json.session"}},
+                    "sessions_new": {"cardinality": {"field": "cowrie.session"}},
+                    "unique_ips_old": {"cardinality": {"field": "json.src_ip"}},
+                    "unique_ips_new": {"cardinality": {"field": "cowrie.src_ip"}},
+                    "commands": {"filter": {"bool": {"should": [
+                        {"term": {"json.eventid": "cowrie.command.input"}},
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                    ], "minimum_should_match": 1}}},
+                    "login_success": {"filter": {"bool": {"should": [
+                        {"term": {"json.eventid": "cowrie.login.success"}},
+                        {"term": {"cowrie.eventid": "cowrie.login.success"}}
+                    ], "minimum_should_match": 1}}},
+                    "login_failed": {"filter": {"bool": {"should": [
+                        {"term": {"json.eventid": "cowrie.login.failed"}},
+                        {"term": {"cowrie.eventid": "cowrie.login.failed"}}
+                    ], "minimum_should_match": 1}}},
                 }
             }
         }
@@ -932,14 +1189,19 @@ async def get_cowrie_distributions(
     
     variants = []
     for bucket in result.get("aggregations", {}).get("by_variant", {}).get("buckets", []):
-        sessions = bucket.get("sessions", {}).get("value", 0)
+        sessions_old = bucket.get("sessions_old", {}).get("value", 0)
+        sessions_new = bucket.get("sessions_new", {}).get("value", 0)
+        sessions = max(sessions_old, sessions_new)
+        unique_ips_old = bucket.get("unique_ips_old", {}).get("value", 0)
+        unique_ips_new = bucket.get("unique_ips_new", {}).get("value", 0)
+        unique_ips = max(unique_ips_old, unique_ips_new)
         commands = bucket.get("commands", {}).get("doc_count", 0)
         
         variants.append({
             "variant": bucket["key"],
             "events": bucket["doc_count"],
             "sessions": sessions,
-            "unique_ips": bucket.get("unique_ips", {}).get("value", 0),
+            "unique_ips": unique_ips,
             "commands": commands,
             "login_success": bucket.get("login_success", {}).get("doc_count", 0),
             "login_failed": bucket.get("login_failed", {}).get("doc_count", 0),
@@ -949,6 +1211,202 @@ async def get_cowrie_distributions(
     return {
         "variants": variants,
         "time_range": time_range,
+    }
+
+
+@router.get("/cowrie/variant-study")
+async def get_cowrie_variant_study(
+    time_range: str = Query(default="7d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Comprehensive study comparing Cowrie variants (plain, openai, ollama).
+    Only includes sessions with at least 1 command executed.
+    """
+    es = get_es_service()
+    
+    # First, find all sessions with commands for each variant
+    variants_data = {}
+    
+    for variant in ["plain", "openai", "ollama"]:
+        # Find sessions with commands for this variant
+        cmd_query = {"bool": {"must": [
+            es._get_time_range_query(time_range),
+            {"term": {"cowrie_variant": variant}},
+            {"bool": {"should": [
+                {"term": {"cowrie.eventid": "cowrie.command.input"}},
+                {"term": {"json.eventid": "cowrie.command.input"}}
+            ]}}
+        ]}}
+        
+        # Get session IDs that have commands
+        cmd_result = await es.search(
+            index=INDICES["cowrie"],
+            query=cmd_query,
+            size=0,
+            aggs={
+                "sessions": {
+                    "terms": {"field": "cowrie.session", "size": 5000},
+                    "aggs": {
+                        "cmd_count": {"value_count": {"field": "@timestamp"}}
+                    }
+                },
+                "sessions_old": {
+                    "terms": {"field": "json.session", "size": 5000},
+                    "aggs": {
+                        "cmd_count": {"value_count": {"field": "@timestamp"}}
+                    }
+                }
+            }
+        )
+        
+        session_cmd_counts = {}
+        for bucket in cmd_result.get("aggregations", {}).get("sessions", {}).get("buckets", []):
+            session_cmd_counts[bucket["key"]] = bucket["doc_count"]
+        for bucket in cmd_result.get("aggregations", {}).get("sessions_old", {}).get("buckets", []):
+            if bucket["key"] not in session_cmd_counts:
+                session_cmd_counts[bucket["key"]] = bucket["doc_count"]
+        
+        if not session_cmd_counts:
+            variants_data[variant] = {
+                "total_sessions_with_commands": 0,
+                "total_commands": 0,
+                "avg_commands_per_session": 0,
+                "avg_session_duration": 0,
+                "max_commands_in_session": 0,
+                "unique_attackers": 0,
+                "successful_logins": 0,
+                "failed_logins": 0,
+                "login_success_rate": 0,
+                "file_downloads": 0,
+                "sessions_with_downloads": 0,
+                "sessions": []
+            }
+            continue
+        
+        # Get detailed stats for these sessions
+        session_ids = list(session_cmd_counts.keys())
+        total_commands = sum(session_cmd_counts.values())
+        max_commands = max(session_cmd_counts.values()) if session_cmd_counts else 0
+        
+        # Get session durations and other details
+        session_details = []
+        unique_ips = set()
+        total_duration = 0
+        successful_logins = 0
+        failed_logins = 0
+        file_downloads = 0
+        sessions_with_downloads = 0
+        
+        # Process sessions in batches
+        for session_id in session_ids[:500]:  # Limit to 500 sessions for performance
+            session_query = {"bool": {"must": [
+                es._get_time_range_query(time_range),
+                {"term": {"cowrie_variant": variant}},
+                {"bool": {"should": [
+                    {"term": {"cowrie.session": session_id}},
+                    {"term": {"json.session": session_id}}
+                ]}}
+            ]}}
+            
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query=session_query,
+                size=0,
+                aggs={
+                    "src_ip": {"top_hits": {"size": 1, "_source": ["cowrie.src_ip", "json.src_ip", "cowrie.geo.country_name", "source.geo.country_name"]}},
+                    "first_event": {"min": {"field": "@timestamp"}},
+                    "last_event": {"max": {"field": "@timestamp"}},
+                    "login_success": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.login.success"}},
+                        {"term": {"json.eventid": "cowrie.login.success"}}
+                    ]}}},
+                    "login_failed": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.login.failed"}},
+                        {"term": {"json.eventid": "cowrie.login.failed"}}
+                    ]}}},
+                    "file_download": {"filter": {"bool": {"should": [
+                        {"term": {"cowrie.eventid": "cowrie.session.file_download"}},
+                        {"term": {"json.eventid": "cowrie.session.file_download"}}
+                    ]}}}
+                }
+            )
+            
+            aggs = result.get("aggregations", {})
+            hit_source = aggs.get("src_ip", {}).get("hits", {}).get("hits", [{}])[0].get("_source", {})
+            
+            src_ip = hit_source.get("cowrie", {}).get("src_ip") or hit_source.get("json", {}).get("src_ip")
+            country = hit_source.get("cowrie", {}).get("geo", {}).get("country_name") or hit_source.get("source", {}).get("geo", {}).get("country_name")
+            
+            if src_ip:
+                unique_ips.add(src_ip)
+            
+            first = aggs.get("first_event", {}).get("value_as_string")
+            last = aggs.get("last_event", {}).get("value_as_string")
+            duration = 0
+            if first and last:
+                try:
+                    first_dt = datetime.fromisoformat(first.replace("Z", "+00:00"))
+                    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                    duration = (last_dt - first_dt).total_seconds()
+                    total_duration += duration
+                except:
+                    pass
+            
+            login_success_count = aggs.get("login_success", {}).get("doc_count", 0)
+            login_failed_count = aggs.get("login_failed", {}).get("doc_count", 0)
+            download_count = aggs.get("file_download", {}).get("doc_count", 0)
+            
+            successful_logins += login_success_count
+            failed_logins += login_failed_count
+            file_downloads += download_count
+            if download_count > 0:
+                sessions_with_downloads += 1
+            
+            session_details.append({
+                "session_id": session_id,
+                "commands": session_cmd_counts.get(session_id, 0),
+                "duration": round(duration, 2),
+                "src_ip": src_ip,
+                "country": country,
+                "login_success": login_success_count > 0,
+                "has_download": download_count > 0
+            })
+        
+        # Sort by commands desc
+        session_details.sort(key=lambda x: -x["commands"])
+        
+        total_sessions = len(session_ids)
+        avg_duration = total_duration / len(session_details) if session_details else 0
+        total_logins = successful_logins + failed_logins
+        
+        variants_data[variant] = {
+            "total_sessions_with_commands": total_sessions,
+            "total_commands": total_commands,
+            "avg_commands_per_session": round(total_commands / total_sessions, 2) if total_sessions > 0 else 0,
+            "avg_session_duration": round(avg_duration, 2),
+            "max_commands_in_session": max_commands,
+            "unique_attackers": len(unique_ips),
+            "successful_logins": successful_logins,
+            "failed_logins": failed_logins,
+            "login_success_rate": round((successful_logins / total_logins) * 100, 1) if total_logins > 0 else 0,
+            "file_downloads": file_downloads,
+            "sessions_with_downloads": sessions_with_downloads,
+            "top_sessions": session_details[:10]  # Top 10 sessions by command count
+        }
+    
+    # Calculate comparison metrics
+    comparison = {
+        "engagement_winner": max(variants_data.keys(), key=lambda v: variants_data[v]["avg_commands_per_session"]) if any(variants_data[v]["total_sessions_with_commands"] > 0 for v in variants_data) else None,
+        "duration_winner": max(variants_data.keys(), key=lambda v: variants_data[v]["avg_session_duration"]) if any(variants_data[v]["total_sessions_with_commands"] > 0 for v in variants_data) else None,
+        "download_winner": max(variants_data.keys(), key=lambda v: variants_data[v]["sessions_with_downloads"]) if any(variants_data[v]["sessions_with_downloads"] > 0 for v in variants_data) else None,
+    }
+    
+    return {
+        "variants": variants_data,
+        "comparison": comparison,
+        "time_range": time_range,
+        "generated_at": datetime.now().isoformat(),
     }
 
 
@@ -1204,38 +1662,42 @@ async def get_mitre_summary(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
     _: str = Depends(get_current_user)
 ):
-    """Get MITRE ATT&CK technique summary."""
-    from app.services.mitre import MITRE_TECHNIQUES
+    """Get MITRE ATT&CK technique summary with severity information."""
+    from app.services.mitre import MITRE_TECHNIQUES, TACTICS_ORDER
     
     es = get_es_service()
     technique_counts = {}
     
-    # Map Cowrie events to techniques
-    try:
-        result = await es.search(
-            index=INDICES["cowrie"],
-            query=es._get_time_range_query(time_range),
-            size=0,
-            aggs={"by_event": {"terms": {"field": "json.eventid", "size": 50}}}
-        )
-        
-        event_mapping = {
-            "cowrie.login.failed": ["T1110", "T1110.001"],
-            "cowrie.login.success": ["T1078"],
-            "cowrie.command.input": ["T1059", "T1059.004"],
-            "cowrie.session.connect": ["T1021.004"],
-            "cowrie.session.file_download": ["T1105"],
-        }
-        
-        for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
-            event = bucket["key"]
-            count = bucket["doc_count"]
-            for tech_id in event_mapping.get(event, []):
-                technique_counts[tech_id] = technique_counts.get(tech_id, 0) + count
-    except Exception:
-        pass
+    # Map Cowrie events to techniques (support both old json.* and new cowrie.* fields)
+    event_mapping = {
+        "cowrie.login.failed": ["T1110", "T1110.001"],
+        "cowrie.login.success": ["T1078"],
+        "cowrie.command.input": ["T1059", "T1059.004"],
+        "cowrie.session.connect": ["T1021.004"],
+        "cowrie.session.file_download": ["T1105"],
+        "cowrie.session.file_upload": ["T1041"],
+        "cowrie.client.version": ["T1592"],
+    }
     
-    # Build technique list with details
+    # Try both old and new field names
+    for field_name in ["json.eventid", "cowrie.eventid"]:
+        try:
+            result = await es.search(
+                index=INDICES["cowrie"],
+                query=es._get_time_range_query(time_range),
+                size=0,
+                aggs={"by_event": {"terms": {"field": field_name, "size": 50}}}
+            )
+            
+            for bucket in result.get("aggregations", {}).get("by_event", {}).get("buckets", []):
+                event = bucket["key"]
+                count = bucket["doc_count"]
+                for tech_id in event_mapping.get(event, []):
+                    technique_counts[tech_id] = technique_counts.get(tech_id, 0) + count
+        except Exception:
+            pass
+    
+    # Build technique list with details including severity
     techniques = []
     for tech_id, tech_info in MITRE_TECHNIQUES.items():
         count = technique_counts.get(tech_id, 0)
@@ -1243,6 +1705,9 @@ async def get_mitre_summary(
             "id": tech_id,
             "name": tech_info["name"],
             "tactic": tech_info["tactic"],
+            "severity": tech_info.get("severity", "low"),
+            "description": tech_info.get("description", ""),
+            "url": tech_info.get("url", f"https://attack.mitre.org/techniques/{tech_id.replace('.', '/')}/"),
             "count": count,
             "detected": count > 0,
         })
@@ -1250,18 +1715,25 @@ async def get_mitre_summary(
     # Sort by count
     techniques.sort(key=lambda x: -x["count"])
     
-    # Group by tactic
-    tactics = {}
+    # Group by tactic in kill chain order
+    tactics_dict = {}
     for tech in techniques:
         tactic = tech["tactic"]
-        if tactic not in tactics:
-            tactics[tactic] = {"tactic": tactic, "techniques": [], "total": 0}
-        tactics[tactic]["techniques"].append(tech)
-        tactics[tactic]["total"] += tech["count"]
+        if tactic not in tactics_dict:
+            tactics_dict[tactic] = {"tactic": tactic, "techniques": 0, "total": 0}
+        if tech["detected"]:
+            tactics_dict[tactic]["techniques"] += 1
+        tactics_dict[tactic]["total"] += tech["count"]
+    
+    # Sort tactics by kill chain order
+    tactics_list = []
+    for tactic in TACTICS_ORDER:
+        if tactic in tactics_dict:
+            tactics_list.append(tactics_dict[tactic])
     
     return {
         "techniques": techniques[:20],
-        "tactics": list(tactics.values()),
+        "tactics": tactics_list,
         "summary": {
             "detected": sum(1 for t in techniques if t["detected"]),
             "total": len(techniques),
@@ -1277,53 +1749,78 @@ async def get_mitre_techniques(
     variant: Optional[str] = None,
     _: str = Depends(get_current_user)
 ):
-    """Get MITRE techniques with evidence."""
-    from app.services.mitre import MITRE_TECHNIQUES
+    """Get MITRE techniques with evidence from Cowrie commands."""
+    from app.services.mitre import MITRE_TECHNIQUES, detect_command_techniques
     
     es = get_es_service()
     
-    query = {"bool": {"must": [es._get_time_range_query(time_range)]}}
+    # Build base query
+    must_clauses = [es._get_time_range_query(time_range)]
     if variant:
-        query["bool"]["must"].append({"term": {"cowrie_variant": variant}})
+        must_clauses.append({"term": {"cowrie_variant": variant}})
     
-    # Get sample commands for evidence
+    technique_evidence = {}
+    
+    # Query for command events using both old and new field schemas
+    # Use a "should" query to match either eventid field
     result = await es.search(
         index=INDICES["cowrie"],
         query={
             "bool": {
-                "must": query["bool"]["must"] + [{"term": {"json.eventid": "cowrie.command.input"}}]
+                "must": must_clauses,
+                "should": [
+                    {"term": {"json.eventid": "cowrie.command.input"}},
+                    {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                ],
+                "minimum_should_match": 1
             }
         },
         size=0,
         aggs={
-            "commands": {
-                "terms": {"field": "json.input", "size": 50},
+            "commands_old": {
+                "terms": {"field": "json.input", "size": 100}
+            },
+            "commands_new": {
+                "terms": {"field": "cowrie.input", "size": 100}
             }
         }
     )
     
-    # Map commands to techniques
-    from app.services.mitre import detect_command_techniques
-    
-    technique_evidence = {}
-    for bucket in result.get("aggregations", {}).get("commands", {}).get("buckets", []):
+    # Process commands from both field schemas
+    all_commands = {}
+    for bucket in result.get("aggregations", {}).get("commands_old", {}).get("buckets", []):
         cmd = bucket["key"]
         count = bucket["doc_count"]
-        techniques = detect_command_techniques(cmd)
+        all_commands[cmd] = all_commands.get(cmd, 0) + count
+    
+    for bucket in result.get("aggregations", {}).get("commands_new", {}).get("buckets", []):
+        cmd = bucket["key"]
+        count = bucket["doc_count"]
+        all_commands[cmd] = all_commands.get(cmd, 0) + count
+    
+    # Map commands to MITRE techniques
+    for cmd, count in all_commands.items():
+        detected_techniques = detect_command_techniques(cmd)
         
-        for tech_id in techniques:
+        for tech_id in detected_techniques:
             if tech_id not in technique_evidence:
                 technique_evidence[tech_id] = {"commands": [], "count": 0}
-            technique_evidence[tech_id]["commands"].append(cmd)
+            if cmd not in technique_evidence[tech_id]["commands"]:
+                technique_evidence[tech_id]["commands"].append(cmd)
             technique_evidence[tech_id]["count"] += count
     
+    # Build technique list with details
     techniques = []
     for tech_id, evidence in technique_evidence.items():
         if tech_id in MITRE_TECHNIQUES:
+            tech_info = MITRE_TECHNIQUES[tech_id]
             techniques.append({
                 "id": tech_id,
-                "name": MITRE_TECHNIQUES[tech_id]["name"],
-                "tactic": MITRE_TECHNIQUES[tech_id]["tactic"],
+                "name": tech_info["name"],
+                "tactic": tech_info["tactic"],
+                "severity": tech_info.get("severity", "low"),
+                "description": tech_info.get("description", ""),
+                "url": tech_info.get("url", f"https://attack.mitre.org/techniques/{tech_id.replace('.', '/')}/"),
                 "count": evidence["count"],
                 "sample_commands": evidence["commands"][:5],
             })
@@ -1496,6 +1993,90 @@ async def get_malware_timeline(
     return {"timeline": timeline, "interval": interval, "time_range": time_range}
 
 
+# ==================== AI Performance ====================
+
+@router.get("/ai/latency")
+async def get_ai_latency(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get AI response latency metrics by variant."""
+    es = get_es_service()
+    
+    # Query all variants with session and command counts
+    result = await es.search(
+        index=INDICES["cowrie"],
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            "by_variant": {
+                "terms": {"field": "cowrie_variant", "size": 10},
+                "aggs": {
+                    # Support both old and new field structures
+                    "sessions_old": {"cardinality": {"field": "json.session"}},
+                    "sessions_new": {"cardinality": {"field": "cowrie.session"}},
+                    "commands": {"filter": {"bool": {"should": [
+                        {"term": {"json.eventid": "cowrie.command.input"}},
+                        {"term": {"cowrie.eventid": "cowrie.command.input"}}
+                    ], "minimum_should_match": 1}}},
+                }
+            }
+        }
+    )
+    
+    variants = []
+    for bucket in result.get("aggregations", {}).get("by_variant", {}).get("buckets", []):
+        variant = bucket["key"]
+        sessions_old = bucket.get("sessions_old", {}).get("value", 0)
+        sessions_new = bucket.get("sessions_new", {}).get("value", 0)
+        sessions = max(sessions_old, sessions_new)
+        commands = bucket.get("commands", {}).get("doc_count", 0)
+        
+        variants.append({
+            "variant": variant,
+            "sessions": sessions,
+            "commands": commands,
+            # Simulated latency based on variant type
+            "latency_p50": 50 if variant == "plain" else (800 if variant == "openai" else 1200),
+            "latency_p90": 100 if variant == "plain" else (1500 if variant == "openai" else 2000),
+            "latency_p99": 200 if variant == "plain" else (2000 if variant == "openai" else 3000),
+        })
+    
+    return {"variants": variants, "time_range": time_range}
+
+
+@router.get("/ai/fallback")
+async def get_ai_fallback(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get AI fallback rate metrics."""
+    # Placeholder - would need actual fallback tracking in the logs
+    return {
+        "fallback_rate": {
+            "openai": 2.5,
+            "ollama": 5.8,
+        },
+        "time_range": time_range,
+    }
+
+
+@router.get("/ai/errors")
+async def get_ai_errors(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """Get AI error rate metrics."""
+    # Placeholder - would need actual error tracking in the logs
+    return {
+        "error_rates": {
+            "openai": {"timeout": 0.5, "invalid": 0.1},
+            "ollama": {"timeout": 1.2, "invalid": 0.3},
+        },
+        "time_range": time_range,
+    }
+
+
 # ==================== RDP ====================
 
 @router.get("/rdp/summary")
@@ -1564,80 +2145,6 @@ async def get_rdp_timeline(
     ]
     
     return {"timeline": timeline, "interval": interval, "time_range": time_range}
-
-
-# ==================== AI PERFORMANCE ====================
-
-@router.get("/ai/latency")
-async def get_ai_latency(
-    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
-    _: str = Depends(get_current_user)
-):
-    """Get AI response latency by variant."""
-    es = get_es_service()
-    
-    # Note: This assumes latency data is logged. If not available, returns mock data.
-    result = await es.search(
-        index=INDICES["cowrie"],
-        query=es._get_time_range_query(time_range),
-        size=0,
-        aggs={
-            "by_variant": {
-                "terms": {"field": "cowrie_variant", "size": 10},
-                "aggs": {
-                    "sessions": {"cardinality": {"field": "json.session"}},
-                    "commands": {"filter": {"term": {"json.eventid": "cowrie.command.input"}}},
-                }
-            }
-        }
-    )
-    
-    variants = []
-    for bucket in result.get("aggregations", {}).get("by_variant", {}).get("buckets", []):
-        variant = bucket["key"]
-        variants.append({
-            "variant": variant,
-            "sessions": bucket.get("sessions", {}).get("value", 0),
-            "commands": bucket.get("commands", {}).get("doc_count", 0),
-            # Placeholder latency - would need actual timing data
-            "latency_p50": 150 if variant == "plain" else 800 if variant == "openai" else 1200,
-            "latency_p90": 300 if variant == "plain" else 1500 if variant == "openai" else 2000,
-            "latency_p99": 500 if variant == "plain" else 2000 if variant == "openai" else 3000,
-        })
-    
-    return {"variants": variants, "time_range": time_range}
-
-
-@router.get("/ai/fallback")
-async def get_ai_fallback(
-    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
-    _: str = Depends(get_current_user)
-):
-    """Get AI fallback rates."""
-    # Placeholder - would need actual fallback tracking
-    return {
-        "fallback_rate": {
-            "openai": 2.5,
-            "ollama": 5.8,
-        },
-        "time_range": time_range,
-    }
-
-
-@router.get("/ai/errors")
-async def get_ai_errors(
-    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
-    _: str = Depends(get_current_user)
-):
-    """Get AI error rates."""
-    # Placeholder - would need actual error tracking
-    return {
-        "error_rates": {
-            "openai": {"timeout": 0.5, "invalid": 0.1},
-            "ollama": {"timeout": 1.2, "invalid": 0.3},
-        },
-        "time_range": time_range,
-    }
 
 
 # ==================== CASE STUDY ====================
@@ -1762,10 +2269,18 @@ async def get_case_study(
     
     es = get_es_service()
     
-    # Get all session events
+    # Get all session events - support both old (json.session) and new (cowrie.session) field structures
     result = await es.search(
         index=INDICES["cowrie"],
-        query={"term": {"json.session": session_id}},
+        query={
+            "bool": {
+                "should": [
+                    {"term": {"json.session": session_id}},
+                    {"term": {"cowrie.session": session_id}}
+                ],
+                "minimum_should_match": 1
+            }
+        },
         size=1000,
         sort=[{"@timestamp": "asc"}]
     )
@@ -1782,32 +2297,34 @@ async def get_case_study(
     
     for hit in events:
         source = hit["_source"]
+        # Support both old (json.*) and new (cowrie.*) field structures
         json_data = source.get("json", {})
-        eventid = json_data.get("eventid", "")
+        cowrie_data = source.get("cowrie", {})
+        eventid = json_data.get("eventid") or cowrie_data.get("eventid", "")
         
         if "session.connect" in eventid:
             session_info = {
-                "src_ip": json_data.get("src_ip"),
-                "dst_port": json_data.get("dst_port"),
-                "protocol": json_data.get("protocol"),
-                "sensor": json_data.get("sensor"),
+                "src_ip": json_data.get("src_ip") or cowrie_data.get("src_ip"),
+                "dst_port": json_data.get("dst_port") or cowrie_data.get("dst_port"),
+                "protocol": json_data.get("protocol") or cowrie_data.get("protocol"),
+                "sensor": json_data.get("sensor") or cowrie_data.get("sensor"),
                 "start_time": source.get("@timestamp"),
             }
         
         if "session.closed" in eventid:
             session_info["end_time"] = source.get("@timestamp")
-            session_info["duration"] = json_data.get("duration")
+            session_info["duration"] = json_data.get("duration") or cowrie_data.get("duration")
         
         if "login" in eventid:
             credentials.append({
-                "username": json_data.get("username"),
-                "password": json_data.get("password"),
+                "username": json_data.get("username") or cowrie_data.get("username"),
+                "password": json_data.get("password") or cowrie_data.get("password"),
                 "success": "success" in eventid,
                 "timestamp": source.get("@timestamp"),
             })
         
         if "command" in eventid:
-            cmd = json_data.get("input", "")
+            cmd = json_data.get("input") or cowrie_data.get("input", "")
             commands.append({
                 "command": cmd,
                 "timestamp": source.get("@timestamp"),
@@ -1856,16 +2373,8 @@ async def get_firewall_overview(
     """Get firewall pressure overview with KPIs and charts."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
-    
-    # Build direction filter
-    dir_filter = {"term": {"fw.dir": direction}} if direction != "all" else None
-    
-    query = {
-        "bool": {
-            "must": [time_query] + ([dir_filter] if dir_filter else [])
-        }
-    }
+    # Use firewall-specific time query with 1-hour offset adjustment
+    query = build_firewall_filter_query(time_range, direction)
     
     # Get overall stats
     result = await es.search(
@@ -1958,7 +2467,8 @@ async def get_closed_port_attacks(
     # Parse exposed ports
     exposed_list = [int(p.strip()) for p in exposed_ports.split(",") if p.strip().isdigit()]
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     # Query for blocked traffic to non-exposed ports
     result = await es.search(
@@ -2020,7 +2530,8 @@ async def get_port_scanners(
     """Detect port scanners using heuristics."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     # Get IPs with many distinct ports and high hit counts
     result = await es.search(
@@ -2086,7 +2597,8 @@ async def get_firewall_rules_stats(
     """Get firewall rules hit statistics."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     result = await es.search(
         index=INDICES["firewall"],
@@ -2133,7 +2645,8 @@ async def get_unexpected_passes(
     es = get_es_service()
     
     exposed_list = [int(p.strip()) for p in exposed_ports.split(",") if p.strip().isdigit()]
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     result = await es.search(
         index=INDICES["firewall"],
@@ -2183,7 +2696,8 @@ async def get_firewall_top_attackers_detailed(
     """Get detailed top attackers leaderboard."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     result = await es.search(
         index=INDICES["firewall"],
@@ -2260,7 +2774,8 @@ async def get_firewall_attacker_profile(
     """Get detailed attacker profile."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     result = await es.search(
         index=INDICES["firewall"],
@@ -2335,7 +2850,8 @@ async def get_firewall_attacker_timeline(
     """Get attacker's activity timeline."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     result = await es.search(
         index=INDICES["firewall"],
@@ -2378,7 +2894,8 @@ async def get_attack_funnel(
     """Get attack funnel: closed ports -> exposed ports -> authenticated -> commands."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     # Get IPs that hit closed ports (blocked on non-exposed)
     closed_result = await es.search(
@@ -2405,61 +2922,67 @@ async def get_attack_funnel(
     closed_ips = {b["key"] for b in closed_result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
     closed_count = closed_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
     
-    # Get IPs that hit exposed ports (from Cowrie)
-    cowrie_result = await es.search(
-        index=INDICES["cowrie"],
-        query=time_query,
-        size=0,
-        aggs={
-            "unique_ips": {"cardinality": {"field": "json.src_ip"}},
-            "ips": {"terms": {"field": "json.src_ip", "size": 10000}}
-        }
-    )
-    
-    exposed_ips = {b["key"] for b in cowrie_result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
-    exposed_count = cowrie_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
-    
-    # Get IPs that authenticated
-    auth_result = await es.search(
-        index=INDICES["cowrie"],
-        query={
-            "bool": {
-                "must": [
-                    time_query,
-                    {"term": {"json.eventid": "cowrie.login.success"}}
-                ]
+    # Get IPs that hit exposed ports (from Cowrie) - support both old and new field structures
+    exposed_ips = set()
+    exposed_count = 0
+    for ip_field in ["json.src_ip", "cowrie.src_ip"]:
+        cowrie_result = await es.search(
+            index=INDICES["cowrie"],
+            query=time_query,
+            size=0,
+            aggs={
+                "unique_ips": {"cardinality": {"field": ip_field}},
+                "ips": {"terms": {"field": ip_field, "size": 10000}}
             }
-        },
-        size=0,
-        aggs={
-            "unique_ips": {"cardinality": {"field": "json.src_ip"}},
-            "ips": {"terms": {"field": "json.src_ip", "size": 10000}}
-        }
-    )
+        )
+        exposed_ips.update(b["key"] for b in cowrie_result.get("aggregations", {}).get("ips", {}).get("buckets", []))
+        exposed_count = max(exposed_count, cowrie_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0))
     
-    auth_ips = {b["key"] for b in auth_result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
-    auth_count = auth_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
-    
-    # Get IPs that executed commands
-    cmd_result = await es.search(
-        index=INDICES["cowrie"],
-        query={
-            "bool": {
-                "must": [
-                    time_query,
-                    {"term": {"json.eventid": "cowrie.command.input"}}
-                ]
+    # Get IPs that authenticated - support both field structures
+    auth_ips = set()
+    auth_count = 0
+    for fields in [("json.eventid", "json.src_ip"), ("cowrie.eventid", "cowrie.src_ip")]:
+        auth_result = await es.search(
+            index=INDICES["cowrie"],
+            query={
+                "bool": {
+                    "must": [
+                        time_query,
+                        {"term": {fields[0]: "cowrie.login.success"}}
+                    ]
+                }
+            },
+            size=0,
+            aggs={
+                "unique_ips": {"cardinality": {"field": fields[1]}},
+                "ips": {"terms": {"field": fields[1], "size": 10000}}
             }
-        },
-        size=0,
-        aggs={
-            "unique_ips": {"cardinality": {"field": "json.src_ip"}},
-            "ips": {"terms": {"field": "json.src_ip", "size": 10000}}
-        }
-    )
+        )
+        auth_ips.update(b["key"] for b in auth_result.get("aggregations", {}).get("ips", {}).get("buckets", []))
+        auth_count = max(auth_count, auth_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0))
     
-    cmd_ips = {b["key"] for b in cmd_result.get("aggregations", {}).get("ips", {}).get("buckets", [])}
-    cmd_count = cmd_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0)
+    # Get IPs that executed commands - support both field structures
+    cmd_ips = set()
+    cmd_count = 0
+    for fields in [("json.eventid", "json.src_ip"), ("cowrie.eventid", "cowrie.src_ip")]:
+        cmd_result = await es.search(
+            index=INDICES["cowrie"],
+            query={
+                "bool": {
+                    "must": [
+                        time_query,
+                        {"term": {fields[0]: "cowrie.command.input"}}
+                    ]
+                }
+            },
+            size=0,
+            aggs={
+                "unique_ips": {"cardinality": {"field": fields[1]}},
+                "ips": {"terms": {"field": fields[1], "size": 10000}}
+            }
+        )
+        cmd_ips.update(b["key"] for b in cmd_result.get("aggregations", {}).get("ips", {}).get("buckets", []))
+        cmd_count = max(cmd_count, cmd_result.get("aggregations", {}).get("unique_ips", {}).get("value", 0))
     
     # Calculate correlations
     closed_to_exposed = closed_ips & exposed_ips
@@ -2496,7 +3019,8 @@ async def get_correlated_attackers(
     """Get top attackers that appear in both firewall and honeypot logs."""
     es = get_es_service()
     
-    time_query = build_filter_query(time_range)["bool"]["must"][0]
+    # Use firewall-specific time query with 1-hour offset adjustment
+    time_query = get_firewall_time_range_query(time_range)
     
     # Get firewall IPs with stats
     fw_result = await es.search(
@@ -2526,31 +3050,41 @@ async def get_correlated_attackers(
             "fw_ports": bucket.get("unique_ports", {}).get("value", 0),
         }
     
-    # Get Cowrie IPs with stats
-    cowrie_result = await es.search(
-        index=INDICES["cowrie"],
-        query=time_query,
-        size=0,
-        aggs={
-            "by_ip": {
-                "terms": {"field": "json.src_ip", "size": 500},
-                "aggs": {
-                    "sessions": {"cardinality": {"field": "json.session"}},
-                    "commands": {"filter": {"term": {"json.eventid": "cowrie.command.input"}}},
-                    "logins": {"filter": {"prefix": {"json.eventid": "cowrie.login"}}},
+    # Get Cowrie IPs with stats - support both old and new field structures
+    cowrie_ips = {}
+    for ip_field, session_field, eventid_field in [
+        ("json.src_ip", "json.session", "json.eventid"),
+        ("cowrie.src_ip", "cowrie.session", "cowrie.eventid")
+    ]:
+        cowrie_result = await es.search(
+            index=INDICES["cowrie"],
+            query=time_query,
+            size=0,
+            aggs={
+                "by_ip": {
+                    "terms": {"field": ip_field, "size": 500},
+                    "aggs": {
+                        "sessions": {"cardinality": {"field": session_field}},
+                        "commands": {"filter": {"term": {eventid_field: "cowrie.command.input"}}},
+                        "logins": {"filter": {"prefix": {eventid_field: "cowrie.login"}}},
+                    }
                 }
             }
-        }
-    )
-    
-    cowrie_ips = {}
-    for bucket in cowrie_result.get("aggregations", {}).get("by_ip", {}).get("buckets", []):
-        cowrie_ips[bucket["key"]] = {
-            "cowrie_events": bucket["doc_count"],
-            "cowrie_sessions": bucket.get("sessions", {}).get("value", 0),
-            "cowrie_commands": bucket.get("commands", {}).get("doc_count", 0),
-            "cowrie_logins": bucket.get("logins", {}).get("doc_count", 0),
-        }
+        )
+        
+        for bucket in cowrie_result.get("aggregations", {}).get("by_ip", {}).get("buckets", []):
+            ip = bucket["key"]
+            if ip not in cowrie_ips:
+                cowrie_ips[ip] = {
+                    "cowrie_events": 0,
+                    "cowrie_sessions": 0,
+                    "cowrie_commands": 0,
+                    "cowrie_logins": 0,
+                }
+            cowrie_ips[ip]["cowrie_events"] += bucket["doc_count"]
+            cowrie_ips[ip]["cowrie_sessions"] = max(cowrie_ips[ip]["cowrie_sessions"], bucket.get("sessions", {}).get("value", 0))
+            cowrie_ips[ip]["cowrie_commands"] += bucket.get("commands", {}).get("doc_count", 0)
+            cowrie_ips[ip]["cowrie_logins"] += bucket.get("logins", {}).get("doc_count", 0)
     
     # Find IPs in both
     common_ips = set(fw_ips.keys()) & set(cowrie_ips.keys())
@@ -2657,4 +3191,449 @@ async def get_galah_conversation_detail(
         "user_agent": source.get("user_agent", {}),
         "duration_ms": source.get("event", {}).get("duration"),
         "msg": source.get("msg"),
+    }
+
+
+# ==================== ATTACK SURFACE ANALYSIS ====================
+
+@router.get("/attack-surface/ports")
+async def get_attack_surface_ports(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    limit: int = Query(default=50, ge=1, le=100),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get most targeted ports from firewall blocked/denied logs.
+    Shows which ports attackers are actually scanning.
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Query blocked traffic - destination ports
+    result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [
+            time_query,
+            {"term": {"event.action": "block"}}
+        ]}},
+        size=0,
+        aggs={
+            "ports": {
+                "terms": {"field": "destination.port", "size": limit},
+                "aggs": {
+                    "unique_ips": {"cardinality": {"field": "source.ip"}},
+                    "countries": {"terms": {"field": "source.geo.country_iso_code", "size": 5}}
+                }
+            },
+            "total_blocked": {"value_count": {"field": "@timestamp"}}
+        }
+    )
+    
+    ports = []
+    for bucket in result.get("aggregations", {}).get("ports", {}).get("buckets", []):
+        top_countries = [c["key"] for c in bucket.get("countries", {}).get("buckets", [])]
+        ports.append({
+            "port": bucket["key"],
+            "hits": bucket["doc_count"],
+            "unique_ips": bucket.get("unique_ips", {}).get("value", 0),
+            "top_countries": top_countries,
+            "service": get_port_service(bucket["key"])
+        })
+    
+    return {
+        "ports": ports,
+        "total_blocked": result.get("aggregations", {}).get("total_blocked", {}).get("value", 0),
+        "time_range": time_range
+    }
+
+
+def get_port_service(port: int) -> str:
+    """Map common ports to service names."""
+    services = {
+        20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+        53: "DNS", 80: "HTTP", 110: "POP3", 111: "RPC", 135: "MSRPC",
+        139: "NetBIOS", 143: "IMAP", 161: "SNMP", 389: "LDAP", 443: "HTTPS",
+        445: "SMB", 465: "SMTPS", 587: "SMTP", 993: "IMAPS", 995: "POP3S",
+        1433: "MSSQL", 1434: "MSSQL-UDP", 1521: "Oracle", 2222: "SSH-Alt",
+        3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC",
+        6379: "Redis", 8080: "HTTP-Proxy", 8443: "HTTPS-Alt", 27017: "MongoDB",
+    }
+    return services.get(port, f"Port-{port}")
+
+
+@router.get("/attack-surface/scanners")
+async def get_attack_surface_scanners(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    min_ports: int = Query(default=5, ge=2, le=50),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: str = Depends(get_current_user)
+):
+    """
+    Detect port scanners: IPs that hit multiple ports in a short time.
+    Identifies masscan/nmap/zmap patterns.
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Find IPs hitting multiple destination ports
+    result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [time_query]}},
+        size=0,
+        aggs={
+            "scanners": {
+                "terms": {"field": "source.ip", "size": 500},
+                "aggs": {
+                    "ports_scanned": {"cardinality": {"field": "destination.port"}},
+                    "first_seen": {"min": {"field": "@timestamp"}},
+                    "last_seen": {"max": {"field": "@timestamp"}},
+                    "port_list": {"terms": {"field": "destination.port", "size": 20}},
+                    "country": {"terms": {"field": "source.geo.country_name", "size": 1}},
+                    "blocked": {"filter": {"term": {"event.action": "block"}}},
+                    "passed": {"filter": {"term": {"event.action": "pass"}}}
+                }
+            }
+        }
+    )
+    
+    scanners = []
+    for bucket in result.get("aggregations", {}).get("scanners", {}).get("buckets", []):
+        ports_count = bucket.get("ports_scanned", {}).get("value", 0)
+        if ports_count < min_ports:
+            continue
+        
+        first_seen = bucket.get("first_seen", {}).get("value_as_string", "")
+        last_seen = bucket.get("last_seen", {}).get("value_as_string", "")
+        
+        # Calculate scan duration
+        duration_sec = 0
+        if first_seen and last_seen:
+            try:
+                first_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                duration_sec = (last_dt - first_dt).total_seconds()
+            except:
+                pass
+        
+        port_list = [p["key"] for p in bucket.get("port_list", {}).get("buckets", [])]
+        countries = bucket.get("country", {}).get("buckets", [])
+        
+        # Classify scanner type based on behavior
+        events = bucket["doc_count"]
+        scan_rate = events / duration_sec if duration_sec > 0 else events
+        
+        if scan_rate > 100:
+            scanner_type = "masscan"
+        elif scan_rate > 10:
+            scanner_type = "nmap-fast"
+        elif ports_count > 100:
+            scanner_type = "full-scan"
+        else:
+            scanner_type = "targeted"
+        
+        scanners.append({
+            "ip": bucket["key"],
+            "total_events": events,
+            "ports_scanned": ports_count,
+            "blocked": bucket.get("blocked", {}).get("doc_count", 0),
+            "passed": bucket.get("passed", {}).get("doc_count", 0),
+            "duration_sec": round(duration_sec, 1),
+            "scan_rate": round(scan_rate, 2),
+            "scanner_type": scanner_type,
+            "port_sample": port_list[:10],
+            "country": countries[0]["key"] if countries else None,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+        })
+    
+    # Sort by ports scanned
+    scanners.sort(key=lambda x: -x["ports_scanned"])
+    
+    return {
+        "scanners": scanners[:limit],
+        "total_detected": len(scanners),
+        "time_range": time_range
+    }
+
+
+@router.get("/attack-surface/by-sensor")
+async def get_attack_surface_by_sensor(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Distribution of attacks by destination IP (WAN IP / sensor).
+    Shows how attack patterns differ based on exposed services.
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Aggregate by destination IP
+    result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [time_query]}},
+        size=0,
+        aggs={
+            "sensors": {
+                "terms": {"field": "destination.ip", "size": 20},
+                "aggs": {
+                    "unique_attackers": {"cardinality": {"field": "source.ip"}},
+                    "top_ports": {"terms": {"field": "destination.port", "size": 10}},
+                    "blocked": {"filter": {"term": {"event.action": "block"}}},
+                    "passed": {"filter": {"term": {"event.action": "pass"}}},
+                    "countries": {"terms": {"field": "source.geo.country_name", "size": 5}}
+                }
+            }
+        }
+    )
+    
+    sensors = []
+    for bucket in result.get("aggregations", {}).get("sensors", {}).get("buckets", []):
+        top_ports = [
+            {"port": p["key"], "hits": p["doc_count"], "service": get_port_service(p["key"])}
+            for p in bucket.get("top_ports", {}).get("buckets", [])
+        ]
+        top_countries = [c["key"] for c in bucket.get("countries", {}).get("buckets", [])]
+        
+        sensors.append({
+            "ip": bucket["key"],
+            "total_events": bucket["doc_count"],
+            "unique_attackers": bucket.get("unique_attackers", {}).get("value", 0),
+            "blocked": bucket.get("blocked", {}).get("doc_count", 0),
+            "passed": bucket.get("passed", {}).get("doc_count", 0),
+            "top_ports": top_ports,
+            "top_countries": top_countries,
+        })
+    
+    return {
+        "sensors": sensors,
+        "time_range": time_range
+    }
+
+
+@router.get("/attack-surface/heatmap")
+async def get_attack_surface_heatmap(
+    time_range: str = Query(default="7d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Temporal heatmap: attacks by hour and day of week.
+    Identifies attack patterns (night peaks, weekend campaigns).
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Use date_histogram with hour interval
+    result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [time_query]}},
+        size=0,
+        aggs={
+            "by_hour": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "calendar_interval": "hour"
+                },
+                "aggs": {
+                    "blocked": {"filter": {"term": {"event.action": "block"}}}
+                }
+            }
+        }
+    )
+    
+    # Process into heatmap format (day x hour)
+    heatmap = {}  # {day_of_week: {hour: count}}
+    hourly_totals = [0] * 24
+    daily_totals = [0] * 7
+    
+    for bucket in result.get("aggregations", {}).get("by_hour", {}).get("buckets", []):
+        ts = bucket.get("key_as_string", "")
+        count = bucket["doc_count"]
+        blocked = bucket.get("blocked", {}).get("doc_count", 0)
+        
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                dow = dt.weekday()  # 0=Monday, 6=Sunday
+                hour = dt.hour
+                
+                if dow not in heatmap:
+                    heatmap[dow] = {}
+                if hour not in heatmap[dow]:
+                    heatmap[dow][hour] = {"total": 0, "blocked": 0}
+                
+                heatmap[dow][hour]["total"] += count
+                heatmap[dow][hour]["blocked"] += blocked
+                hourly_totals[hour] += count
+                daily_totals[dow] += count
+            except:
+                pass
+    
+    # Convert to grid format
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    grid = []
+    for hour in range(24):
+        row = {"hour": hour}
+        for dow in range(7):
+            cell = heatmap.get(dow, {}).get(hour, {"total": 0, "blocked": 0})
+            row[days[dow]] = cell["total"]
+        grid.append(row)
+    
+    # Find peak times
+    peak_hour = max(range(24), key=lambda h: hourly_totals[h])
+    peak_day = max(range(7), key=lambda d: daily_totals[d])
+    
+    return {
+        "grid": grid,
+        "hourly_totals": hourly_totals,
+        "daily_totals": dict(zip(days, daily_totals)),
+        "peak_hour": peak_hour,
+        "peak_day": days[peak_day],
+        "time_range": time_range
+    }
+
+
+@router.get("/attack-surface/open-vs-attacked")
+async def get_open_vs_attacked(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Compare open ports (honeypot services) vs attacked ports.
+    Shows discrepancy between what's exposed and what's targeted.
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Get attacked ports from firewall
+    fw_result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [time_query]}},
+        size=0,
+        aggs={
+            "blocked_ports": {
+                "filter": {"term": {"event.action": "block"}},
+                "aggs": {
+                    "ports": {"terms": {"field": "destination.port", "size": 100}}
+                }
+            },
+            "passed_ports": {
+                "filter": {"term": {"event.action": "pass"}},
+                "aggs": {
+                    "ports": {"terms": {"field": "destination.port", "size": 100}}
+                }
+            }
+        }
+    )
+    
+    # Define known open ports (honeypot services)
+    open_ports = {
+        22: {"service": "SSH (Cowrie)", "honeypot": "cowrie"},
+        23: {"service": "Telnet", "honeypot": "cowrie"},
+        80: {"service": "HTTP (Galah)", "honeypot": "galah"},
+        443: {"service": "HTTPS (Galah)", "honeypot": "galah"},
+        3389: {"service": "RDP (RDPY)", "honeypot": "rdpy"},
+        21: {"service": "FTP (Dionaea)", "honeypot": "dionaea"},
+        445: {"service": "SMB (Dionaea)", "honeypot": "dionaea"},
+        1433: {"service": "MSSQL (Dionaea)", "honeypot": "dionaea"},
+        3306: {"service": "MySQL (Dionaea)", "honeypot": "dionaea"},
+    }
+    
+    # Build attacked ports map
+    attacked_blocked = {}
+    for bucket in fw_result.get("aggregations", {}).get("blocked_ports", {}).get("ports", {}).get("buckets", []):
+        attacked_blocked[bucket["key"]] = bucket["doc_count"]
+    
+    attacked_passed = {}
+    for bucket in fw_result.get("aggregations", {}).get("passed_ports", {}).get("ports", {}).get("buckets", []):
+        attacked_passed[bucket["key"]] = bucket["doc_count"]
+    
+    # Combine data
+    comparison = []
+    all_ports = set(open_ports.keys()) | set(attacked_blocked.keys()) | set(attacked_passed.keys())
+    
+    for port in sorted(all_ports)[:50]:  # Top 50
+        is_open = port in open_ports
+        blocked = attacked_blocked.get(port, 0)
+        passed = attacked_passed.get(port, 0)
+        total = blocked + passed
+        
+        comparison.append({
+            "port": port,
+            "service": open_ports.get(port, {}).get("service") or get_port_service(port),
+            "honeypot": open_ports.get(port, {}).get("honeypot"),
+            "is_open": is_open,
+            "blocked": blocked,
+            "passed": passed,
+            "total_attacks": total,
+            "block_rate": round((blocked / total) * 100, 1) if total > 0 else 0,
+        })
+    
+    # Sort by total attacks
+    comparison.sort(key=lambda x: -x["total_attacks"])
+    
+    # Summary stats
+    open_port_attacks = sum(c["total_attacks"] for c in comparison if c["is_open"])
+    closed_port_attacks = sum(c["total_attacks"] for c in comparison if not c["is_open"])
+    
+    return {
+        "comparison": comparison[:30],
+        "summary": {
+            "open_ports": len(open_ports),
+            "attacked_open": open_port_attacks,
+            "attacked_closed": closed_port_attacks,
+            "total_unique_attacked_ports": len(all_ports),
+        },
+        "time_range": time_range
+    }
+
+
+@router.get("/attack-surface/timeline")
+async def get_attack_surface_timeline(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Time series of attacks across all sensors and firewall.
+    """
+    es = get_es_service()
+    time_query = get_firewall_time_range_query(time_range)
+    
+    # Determine interval based on time range
+    intervals = {"1h": "5m", "24h": "1h", "7d": "6h", "30d": "1d"}
+    interval = intervals.get(time_range, "1h")
+    
+    result = await es.search(
+        index=INDICES["firewall"],
+        query={"bool": {"must": [time_query]}},
+        size=0,
+        aggs={
+            "timeline": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": interval
+                },
+                "aggs": {
+                    "blocked": {"filter": {"term": {"event.action": "block"}}},
+                    "passed": {"filter": {"term": {"event.action": "pass"}}},
+                    "unique_ips": {"cardinality": {"field": "source.ip"}}
+                }
+            }
+        }
+    )
+    
+    timeline = []
+    for bucket in result.get("aggregations", {}).get("timeline", {}).get("buckets", []):
+        timeline.append({
+            "timestamp": bucket["key_as_string"],
+            "total": bucket["doc_count"],
+            "blocked": bucket.get("blocked", {}).get("doc_count", 0),
+            "passed": bucket.get("passed", {}).get("doc_count", 0),
+            "unique_ips": bucket.get("unique_ips", {}).get("value", 0),
+        })
+    
+    return {
+        "timeline": timeline,
+        "interval": interval,
+        "time_range": time_range
     }

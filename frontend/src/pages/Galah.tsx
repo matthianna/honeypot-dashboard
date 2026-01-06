@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   BarChart2,
   Clock,
@@ -6,7 +7,6 @@ import {
   Link2,
   Eye,
   Brain,
-  Terminal,
   TrendingUp,
   CheckCircle,
   XCircle,
@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Globe,
   Filter,
+  Users,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -41,6 +42,7 @@ import DataTable from '../components/DataTable';
 import LoadingSpinner from '../components/LoadingSpinner';
 import GalahPreviewModal from '../components/GalahPreviewModal';
 import HoneypotPorts from '../components/HoneypotPorts';
+import HoneypotMap from '../components/HoneypotMap';
 import IPLink from '../components/IPLink';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
@@ -50,6 +52,7 @@ import type { GalahPath, GeoPoint } from '../types';
 const COLORS = ['#ff6600', '#39ff14', '#00d4ff', '#bf00ff', '#ff3366', '#ffff00'];
 
 export default function Galah() {
+  const navigate = useNavigate();
   const { timeRange, setTimeRange } = useTimeRange('24h');
   const [selectedInteractionId, setSelectedInteractionId] = useState<string | null>(null);
   
@@ -95,18 +98,8 @@ export default function Galah() {
     [timeRange]
   );
 
-  const { data: successRateTrend, loading: successRateTrendLoading } = useApiWithRefresh(
-    useCallback(() => api.getGalahSuccessRateTrend(timeRange), [timeRange]),
-    [timeRange]
-  );
-
   const { data: pathCategories, loading: pathCategoriesLoading } = useApiWithRefresh(
     useCallback(() => api.getGalahPathCategories(timeRange), [timeRange]),
-    [timeRange]
-  );
-
-  const { data: requestMethods, loading: requestMethodsLoading } = useApiWithRefresh(
-    useCallback(() => api.getGalahRequestMethods(timeRange), [timeRange]),
     [timeRange]
   );
 
@@ -286,6 +279,32 @@ export default function Galah() {
                 loading={interactionsLoading}
                 emptyMessage="No interactions recorded"
               />
+            </CardContent>
+          </Card>
+
+          {/* Top 5 Attack Countries */}
+          <Card>
+            <CardHeader 
+              title="Top Attack Countries" 
+              subtitle={`${geo?.data?.length || 0} countries total`}
+              icon={<Globe className="w-5 h-5" />}
+            />
+            <CardContent>
+              {geoLoading ? (
+                <div className="h-32 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {geo?.data?.slice(0, 5).map((item: GeoPoint, index: number) => (
+                    <div key={item.country} className="bg-bg-secondary rounded-lg p-3 text-center hover:bg-bg-hover transition-colors">
+                      <div className="flex items-center justify-center gap-2 mb-1">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                        <span className="font-medium text-text-primary text-sm truncate">{item.country}</span>
+                      </div>
+                      <div className="text-lg font-mono font-bold text-neon-orange">{item.count.toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -468,15 +487,6 @@ export default function Galah() {
                                     <XCircle className="w-4 h-4 mr-1" />
                                     Failed
                                   </span>
-                                )}
-                              </div>
-                              <div className="text-xs text-text-muted">
-                                {interaction.generation_source === 'llm' ? (
-                                  <span className="text-neon-purple">🤖 LLM Generated</span>
-                                ) : interaction.generation_source === 'cache' ? (
-                                  <span className="text-neon-blue">💾 Cached</span>
-                                ) : (
-                                  <span>{interaction.content_type as string}</span>
                                 )}
                               </div>
                             </td>
@@ -666,48 +676,221 @@ export default function Galah() {
       label: 'Paths',
       icon: <Link2 className="w-4 h-4" />,
       content: (
-        <Card>
-          <CardHeader title="Targeted Paths" subtitle="Most requested URI paths" />
-          <CardContent>
-            {pathsLoading ? (
-              <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <div className="space-y-2 max-h-96 overflow-y-auto">
-                {paths?.slice(0, 30).map((item: GalahPath) => (
-                  <div key={item.path} className="flex items-center justify-between p-3 bg-bg-secondary rounded-lg">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-mono text-sm text-neon-orange truncate">{item.path}</div>
-                      <div className="flex gap-2 mt-1">
-                        {item.methods.map((method) => (
-                          <span key={method} className="text-xs px-2 py-0.5 bg-bg-card rounded text-text-secondary">{method}</span>
-                        ))}
+        <div className="space-y-6">
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+              <div className="text-3xl font-bold text-neon-orange">{paths?.length || 0}</div>
+              <div className="text-sm text-text-secondary mt-1">Unique Paths</div>
+            </div>
+            <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+              <div className="text-3xl font-bold text-neon-green">{pathCategories?.categories?.length || 0}</div>
+              <div className="text-sm text-text-secondary mt-1">Categories</div>
+            </div>
+            <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+              <div className="text-3xl font-bold text-neon-blue">{pathCategories?.categories?.[0]?.category || 'N/A'}</div>
+              <div className="text-sm text-text-secondary mt-1">Top Category</div>
+            </div>
+            <div className="p-4 bg-bg-card border border-bg-hover rounded-lg text-center">
+              <div className="text-3xl font-bold text-neon-red">{paths?.reduce((sum, p) => sum + p.count, 0)?.toLocaleString() || 0}</div>
+              <div className="text-sm text-text-secondary mt-1">Total Requests</div>
+            </div>
+          </div>
+
+          {/* Path Categories - Main Feature */}
+          <Card>
+            <CardHeader 
+              title="Path Categories" 
+              subtitle="What attackers are looking for - grouped by attack type"
+              icon={<Link2 className="w-5 h-5" />}
+            />
+            <CardContent>
+              {pathCategoriesLoading ? (
+                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {pathCategories?.categories?.map((cat, index) => {
+                    const totalRequests = pathCategories?.categories?.reduce((sum, c) => sum + c.count, 0) || 1;
+                    const percentage = ((cat.count / totalRequests) * 100).toFixed(1);
+                    return (
+                      <div key={cat.category} className="bg-bg-secondary rounded-lg p-4 border border-bg-hover hover:border-neon-orange/30 transition-colors">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                            <span className="font-semibold text-text-primary">{cat.category}</span>
+                          </div>
+                          <span className="text-xs px-2 py-1 bg-neon-orange/20 text-neon-orange rounded-full">
+                            {percentage}%
+                          </span>
+                        </div>
+                        <div className="text-2xl font-mono font-bold text-neon-green mb-3">
+                          {cat.count.toLocaleString()}
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-xs text-text-muted mb-2">Top paths:</div>
+                          {cat.top_paths.slice(0, 4).map((p) => (
+                            <div key={p.path} className="flex items-center justify-between text-xs">
+                              <span className="font-mono text-text-secondary truncate max-w-[180px]" title={p.path}>
+                                {p.path}
+                              </span>
+                              <span className="text-neon-green ml-2">{p.count}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                    <span className="font-mono text-neon-green ml-4">{item.count.toLocaleString()}</span>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Category Distribution Chart */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader title="Category Distribution" subtitle="Visual breakdown of attack types" />
+              <CardContent>
+                {pathCategoriesLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={pathCategories?.categories?.slice(0, 8) || []}
+                          dataKey="count"
+                          nameKey="category"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={50}
+                          outerRadius={90}
+                          paddingAngle={2}
+                        >
+                          {pathCategories?.categories?.slice(0, 8).map((_, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Requests']}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
                   </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader title="Category Bar Chart" subtitle="Comparison by volume" />
+              <CardContent>
+                {pathCategoriesLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={pathCategories?.categories?.slice(0, 8) || []} layout="vertical" margin={{ left: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis type="number" stroke="#888888" tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}K` : v} />
+                        <YAxis 
+                          dataKey="category" 
+                          type="category" 
+                          stroke="#888888" 
+                          width={100}
+                          tick={{ fill: '#888888', fontSize: 11 }}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          formatter={(value: number) => [value.toLocaleString(), 'Requests']}
+                        />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                          {pathCategories?.categories?.slice(0, 8).map((_, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* All Targeted Paths List */}
+          <Card>
+            <CardHeader title="All Targeted Paths" subtitle="Complete list of requested URI paths" />
+            <CardContent>
+              {pathsLoading ? (
+                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="space-y-2 max-h-[500px] overflow-y-auto">
+                  {paths?.slice(0, 50).map((item: GalahPath, index: number) => (
+                    <div key={item.path} className="flex items-center justify-between p-3 bg-bg-secondary rounded-lg hover:bg-bg-hover transition-colors">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="w-8 h-8 flex items-center justify-center bg-bg-primary rounded-full text-sm font-mono text-text-muted">
+                          {index + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-sm text-neon-orange truncate" title={item.path}>{item.path}</div>
+                          <div className="flex gap-2 mt-1">
+                            {item.methods.map((method) => {
+                              const methodColors: Record<string, string> = {
+                                GET: 'bg-neon-green/20 text-neon-green',
+                                POST: 'bg-neon-blue/20 text-neon-blue',
+                                PUT: 'bg-neon-orange/20 text-neon-orange',
+                                DELETE: 'bg-neon-red/20 text-neon-red',
+                                HEAD: 'bg-neon-purple/20 text-neon-purple',
+                              };
+                              return (
+                                <span key={method} className={`text-xs px-2 py-0.5 rounded font-mono ${methodColors[method] || 'bg-bg-card text-text-secondary'}`}>
+                                  {method}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="font-mono text-neon-green ml-4 font-semibold">{item.count.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       ),
     },
     {
       id: 'map',
-      label: 'Geographic',
+      label: 'Attack Map',
       icon: <Map className="w-4 h-4" />,
       content: (
-        <Card>
-          <CardHeader title="Request Origins" />
-          <CardContent>
-            {geoLoading ? (
-              <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          <HoneypotMap
+            data={geo?.data?.map((g: GeoPoint) => ({ country: g.country, count: g.count })) || []}
+            title="Galah Attack Origins"
+            height="450px"
+            accentColor="#ff6600"
+            loading={geoLoading}
+          />
+          
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Pie Chart */}
+            <Card>
+              <CardHeader title="Top Countries Distribution" subtitle="Request share by country" />
+              <CardContent>
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
-                      <Pie data={geo?.data?.slice(0, 6) || []} dataKey="count" nameKey="country" cx="50%" cy="50%" outerRadius={80} label>
+                      <Pie 
+                        data={geo?.data?.slice(0, 6) || []} 
+                        dataKey="count" 
+                        nameKey="country" 
+                        cx="50%" 
+                        cy="50%" 
+                        outerRadius={80} 
+                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                      >
                         {geo?.data?.slice(0, 6).map((_: unknown, index: number) => (
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
@@ -716,154 +899,24 @@ export default function Galah() {
                     </PieChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="space-y-2">
+              </CardContent>
+            </Card>
+
+            {/* Country List */}
+            <Card>
+              <CardHeader title="Attack Countries" subtitle={`${geo?.data?.length || 0} countries detected`} />
+              <CardContent>
+                <div className="space-y-2 max-h-64 overflow-y-auto">
                   {geo?.data?.slice(0, 12).map((item: GeoPoint, index: number) => (
-                    <div key={item.country} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg">
-                      <div className="flex items-center">
-                        <div className="w-3 h-3 rounded-full mr-3" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                        <span className="text-text-primary">{item.country}</span>
+                    <div key={item.country} className="flex items-center justify-between p-2 bg-bg-secondary rounded-lg hover:bg-bg-hover transition-colors">
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                        <span className="text-text-primary font-medium">{item.country}</span>
                       </div>
                       <span className="font-mono text-neon-orange">{item.count.toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ),
-    },
-    {
-      id: 'analytics',
-      label: 'Analytics',
-      icon: <TrendingUp className="w-4 h-4" />,
-      content: (
-        <div className="space-y-6">
-          {/* AI Success Rate Trend */}
-          <Card>
-            <CardHeader title="AI Response Success Rate Over Time" subtitle="Key thesis metric: LLM effectiveness trend" icon={<Brain className="w-5 h-5" />} />
-            <CardContent>
-              {successRateTrendLoading ? (
-                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={successRateTrend?.trend || []}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                      <XAxis 
-                        dataKey="timestamp" 
-                        tickFormatter={(ts) => new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                        stroke="#888888"
-                        tick={{ fill: '#888888', fontSize: 10 }}
-                      />
-                      <YAxis 
-                        yAxisId="left"
-                        stroke="#888888" 
-                        tick={{ fill: '#888888', fontSize: 10 }}
-                      />
-                      <YAxis 
-                        yAxisId="right"
-                        orientation="right"
-                        domain={[0, 100]}
-                        stroke="#888888" 
-                        tick={{ fill: '#888888', fontSize: 10 }}
-                        tickFormatter={(v) => `${v}%`}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#1a1a25',
-                          border: '1px solid #252532',
-                          borderRadius: '8px',
-                          color: '#e0e0e0',
-                        }}
-                        labelFormatter={(ts) => new Date(ts).toLocaleString()}
-                      />
-                      <Legend />
-                      <Line yAxisId="left" type="monotone" dataKey="success" name="Success" stroke="#39ff14" strokeWidth={2} dot={false} />
-                      <Line yAxisId="left" type="monotone" dataKey="failed" name="Failed" stroke="#ff3366" strokeWidth={2} dot={false} />
-                      <Line yAxisId="right" type="monotone" dataKey="success_rate" name="Success Rate %" stroke="#ff6600" strokeWidth={2} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Path Categories */}
-            <Card>
-              <CardHeader title="Attack Path Categories" subtitle="What attackers are looking for" icon={<Link2 className="w-5 h-5" />} />
-              <CardContent>
-                {pathCategoriesLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <div className="space-y-3 max-h-80 overflow-y-auto">
-                    {pathCategories?.categories?.map((cat, index) => (
-                      <div key={cat.category} className="bg-bg-secondary rounded-lg p-3">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center">
-                            <div className="w-3 h-3 rounded-full mr-2" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                            <span className="font-medium text-text-primary">{cat.category}</span>
-                          </div>
-                          <span className="font-mono text-neon-orange">{cat.count.toLocaleString()}</span>
-                        </div>
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {cat.top_paths.slice(0, 3).map((p) => (
-                            <span key={p.path} className="px-2 py-0.5 bg-bg-primary rounded text-xs font-mono text-text-secondary truncate max-w-[150px]" title={p.path}>
-                              {p.path}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Request Methods */}
-            <Card>
-              <CardHeader title="Request Methods Analysis" subtitle="HTTP methods with success rates" icon={<Terminal className="w-5 h-5" />} />
-              <CardContent>
-                {requestMethodsLoading ? (
-                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-                ) : (
-                  <>
-                    <div className="h-48">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={requestMethods?.methods || []}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                          <XAxis dataKey="method" stroke="#888888" tick={{ fill: '#888888', fontSize: 12 }} />
-                          <YAxis stroke="#888888" tick={{ fill: '#888888', fontSize: 10 }} />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#1a1a25',
-                              border: '1px solid #252532',
-                              borderRadius: '8px',
-                              color: '#e0e0e0',
-                            }}
-                          />
-                          <Legend />
-                          <Bar dataKey="success" name="Success" fill="#39ff14" stackId="a" />
-                          <Bar dataKey="failed" name="Failed" fill="#ff3366" stackId="a" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <div className="mt-4 space-y-2">
-                      {requestMethods?.methods?.map((m) => (
-                        <div key={m.method} className="flex items-center justify-between text-sm">
-                          <span className="font-mono text-neon-blue">{m.method}</span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-text-secondary">{m.count.toLocaleString()} total</span>
-                            <span className={`font-bold ${m.success_rate > 70 ? 'text-neon-green' : m.success_rate > 40 ? 'text-neon-orange' : 'text-neon-red'}`}>
-                              {m.success_rate}%
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
               </CardContent>
             </Card>
           </div>
@@ -879,7 +932,16 @@ export default function Galah() {
           <h2 className="text-xl font-display font-semibold text-neon-orange">Galah Web Honeypot</h2>
           <p className="text-sm text-text-secondary mt-1">LLM-powered web application honeypot with AI-generated responses</p>
         </div>
-        <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/galah/attackers')}
+            className="flex items-center gap-2 px-4 py-2 bg-neon-orange/20 text-neon-orange rounded-lg hover:bg-neon-orange/30 transition-colors border border-neon-orange/30"
+          >
+            <Users className="w-4 h-4" />
+            Attacker Sessions
+          </button>
+          <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
+        </div>
       </div>
       <Tabs tabs={tabs} defaultTab="overview" />
 
