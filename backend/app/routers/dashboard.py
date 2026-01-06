@@ -1202,6 +1202,139 @@ async def get_top_threat_actors(
     }
 
 
+@router.get("/period-comparison")
+async def get_period_comparison(
+    time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get comparison between current period and previous period.
+    For thesis: shows attack trends over time.
+    """
+    from datetime import datetime, timedelta
+    
+    es = get_es_service()
+    
+    # Index field mappings
+    INDEX_FIELDS = {
+        "cowrie": {"index": ".ds-cowrie-*", "ip": ["json.src_ip", "cowrie.src_ip"], "geo": "source.geo.country_name"},
+        "dionaea": {"index": "dionaea-*", "ip": ["source.ip.keyword"], "geo": "source.geo.country_name"},
+        "galah": {"index": ".ds-galah-*", "ip": ["source.ip"], "geo": "source.geo.country_name"},
+        "heralding": {"index": ".ds-heralding-*", "ip": ["source.ip"], "geo": "source.geo.country_name"},
+        "rdpy": {"index": ".ds-rdpy-*", "ip": ["source.ip"], "geo": "source.geo.country_name"},
+    }
+    
+    # Calculate time ranges
+    now = datetime.utcnow()
+    range_map = {
+        "1h": timedelta(hours=1),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    delta = range_map.get(time_range, timedelta(hours=24))
+    
+    current_start = now - delta
+    previous_start = current_start - delta
+    previous_end = current_start
+    
+    # Helper to get stats for a period
+    async def get_period_stats(start: datetime, end: datetime):
+        stats = {
+            "total_events": 0,
+            "unique_ips": set(),
+            "countries": set(),
+        }
+        
+        for name, fields in INDEX_FIELDS.items():
+            for ip_field in fields["ip"]:
+                try:
+                    result = await es.search(
+                        index=fields["index"],
+                        query={
+                            "bool": {
+                                "must": [
+                                    {"range": {"@timestamp": {
+                                        "gte": start.isoformat() + "Z",
+                                        "lt": end.isoformat() + "Z"
+                                    }}}
+                                ]
+                            }
+                        },
+                        size=0,
+                        aggs={
+                            "unique_ips": {"terms": {"field": ip_field, "size": 10000}},
+                            "countries": {"terms": {"field": fields["geo"], "size": 200}},
+                        }
+                    )
+                    stats["total_events"] += result.get("hits", {}).get("total", {}).get("value", 0)
+                    
+                    for bucket in result.get("aggregations", {}).get("unique_ips", {}).get("buckets", []):
+                        ip = bucket["key"]
+                        if not is_internal_ip(ip):
+                            stats["unique_ips"].add(ip)
+                    
+                    for bucket in result.get("aggregations", {}).get("countries", {}).get("buckets", []):
+                        if bucket["key"]:
+                            stats["countries"].add(bucket["key"])
+                except Exception:
+                    pass
+        
+        return {
+            "total_events": stats["total_events"],
+            "unique_ips": len(stats["unique_ips"]),
+            "countries": len(stats["countries"]),
+            "ip_list": list(stats["unique_ips"]),
+            "country_list": list(stats["countries"]),
+        }
+    
+    current_stats = await get_period_stats(current_start, now)
+    previous_stats = await get_period_stats(previous_start, previous_end)
+    
+    # Calculate changes
+    def calc_change(current, previous):
+        if previous == 0:
+            return 100.0 if current > 0 else 0.0
+        return round(((current - previous) / previous) * 100, 1)
+    
+    # Find new IPs and countries
+    current_ips = set(current_stats["ip_list"])
+    previous_ips = set(previous_stats["ip_list"])
+    new_ips = current_ips - previous_ips
+    
+    current_countries = set(current_stats["country_list"])
+    previous_countries = set(previous_stats["country_list"])
+    new_countries = current_countries - previous_countries
+    
+    return {
+        "time_range": time_range,
+        "current_period": {
+            "start": current_start.isoformat() + "Z",
+            "end": now.isoformat() + "Z",
+            "total_events": current_stats["total_events"],
+            "unique_ips": current_stats["unique_ips"],
+            "countries": current_stats["countries"],
+        },
+        "previous_period": {
+            "start": previous_start.isoformat() + "Z",
+            "end": previous_end.isoformat() + "Z",
+            "total_events": previous_stats["total_events"],
+            "unique_ips": previous_stats["unique_ips"],
+            "countries": previous_stats["countries"],
+        },
+        "changes": {
+            "events_change_percent": calc_change(current_stats["total_events"], previous_stats["total_events"]),
+            "ips_change_percent": calc_change(current_stats["unique_ips"], previous_stats["unique_ips"]),
+            "countries_change_percent": calc_change(current_stats["countries"], previous_stats["countries"]),
+        },
+        "new_threats": {
+            "new_ips_count": len(new_ips),
+            "new_countries_count": len(new_countries),
+            "new_countries": list(new_countries),
+        }
+    }
+
+
 @router.get("/honeypot-health")
 async def get_honeypot_health(
     _: str = Depends(get_current_user)

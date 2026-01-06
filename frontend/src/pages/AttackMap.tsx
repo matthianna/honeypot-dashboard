@@ -104,17 +104,23 @@ export default function AttackMap() {
     uniqueIps: new Set<string>(),
     countries: new Set<string>(),
     byHoneypot: {} as Record<string, number>,
+    byCountry: {} as Record<string, number>,
   });
   
   const [events, setEvents] = useState<MapAttackEvent[]>([]);
-  const [topCountries, setTopCountries] = useState<TopCountry[]>([]);
   const [mapLayer, setMapLayer] = useState('satellite');
+  
+  // Compute top countries from session stats
+  const topCountries: TopCountry[] = Object.entries(sessionStats.byCountry)
+    .map(([country, count]) => ({ country, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
   
   const seenIds = useRef<Set<string>>(new Set());
   const sessionStart = useRef<Date>(new Date());
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  const EVENT_LIFETIME = 5000;
+  const EVENT_LIFETIME = 10000;
   const POLL_INTERVAL = 5000;
 
   const addEvents = useCallback((newEvents: ApiAttackEvent[]) => {
@@ -146,11 +152,17 @@ export default function AttackMap() {
           const newByHoneypot = { ...prev.byHoneypot };
           newByHoneypot[event.honeypot] = (newByHoneypot[event.honeypot] || 0) + 1;
           
+          const newByCountry = { ...prev.byCountry };
+          if (event.src_country) {
+            newByCountry[event.src_country] = (newByCountry[event.src_country] || 0) + 1;
+          }
+          
           return {
             totalAttacks: prev.totalAttacks + 1,
             uniqueIps: newIps,
             countries: newCountries,
             byHoneypot: newByHoneypot,
+            byCountry: newByCountry,
           };
         });
       }
@@ -170,18 +182,9 @@ export default function AttackMap() {
     return () => clearInterval(cleanupInterval);
   }, []);
 
-  const fetchTopCountries = useCallback(async () => {
-    try {
-      const response = await api.getAttackMapTopCountries(10);
-      setTopCountries(response.countries || []);
-    } catch (error) {
-      console.error('Failed to fetch top countries:', error);
-    }
-  }, []);
-
   const pollEvents = useCallback(async () => {
     try {
-      const response = await api.getAttackMapRecent(50, 10);
+      const response = await api.getAttackMapRecent(50, 60);
       if (Array.isArray(response)) {
         addEvents(response);
       }
@@ -198,22 +201,19 @@ export default function AttackMap() {
       uniqueIps: new Set(),
       countries: new Set(),
       byHoneypot: {},
+      byCountry: {},
     });
     
-    fetchTopCountries();
     pollEvents();
     
     pollRef.current = setInterval(() => {
       pollEvents();
     }, POLL_INTERVAL);
     
-    const countriesInterval = setInterval(fetchTopCountries, 10000);
-    
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      clearInterval(countriesInterval);
     };
-  }, [pollEvents, fetchTopCountries]);
+  }, [pollEvents]);
 
   const getEventOpacity = (event: MapAttackEvent): number => {
     const age = Date.now() - event.addedAt;
@@ -341,8 +341,8 @@ export default function AttackMap() {
         </div>
       </div>
 
-      {/* Top Countries Overlay - Right Side */}
-      <div className="absolute top-24 right-4 z-[1000] w-52">
+      {/* Top Countries Overlay - Left Side */}
+      <div className="absolute top-24 left-4 z-[1000] w-56">
         <div className="bg-black/80 backdrop-blur-sm border border-neon-orange/30 rounded-xl p-3">
           <div className="flex items-center gap-2 mb-3">
             <Globe className="w-4 h-4 text-neon-orange" />
@@ -350,7 +350,10 @@ export default function AttackMap() {
           </div>
           <div className="space-y-1.5 max-h-[350px] overflow-y-auto">
             {topCountries.length === 0 ? (
-              <div className="text-center py-2 text-text-muted text-xs">Loading...</div>
+              <div className="text-center py-4 text-text-muted text-xs">
+                <div className="text-lg mb-1">—</div>
+                <div>Waiting for attacks...</div>
+              </div>
             ) : (
               topCountries.map((country, index) => {
                 const maxCount = topCountries[0]?.count || 1;

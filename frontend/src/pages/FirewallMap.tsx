@@ -93,17 +93,23 @@ export default function FirewallMap() {
     passed: 0,
     uniqueIps: new Set<string>(),
     countries: new Set<string>(),
+    byCountry: {} as Record<string, { count: number; blocked: number; passed: number }>,
   });
   
   const [events, setEvents] = useState<FirewallEvent[]>([]);
-  const [topCountries, setTopCountries] = useState<TopCountry[]>([]);
   const [mapLayer, setMapLayer] = useState('satellite');
+  
+  // Compute top countries from session stats
+  const topCountries: TopCountry[] = Object.entries(sessionStats.byCountry)
+    .map(([country, data]) => ({ country, count: data.count, blocked: data.blocked, passed: data.passed }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
   
   const seenIds = useRef<Set<string>>(new Set());
   const sessionStart = useRef<Date>(new Date());
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  const EVENT_LIFETIME = 5000;
+  const EVENT_LIFETIME = 10000;
   const POLL_INTERVAL = 5000;
 
   const addEvents = useCallback((newEvents: FirewallEvent[]) => {
@@ -125,12 +131,26 @@ export default function FirewallMap() {
           const newCountries = new Set(prev.countries);
           if (event.src_country) newCountries.add(event.src_country);
           
+          const newByCountry = { ...prev.byCountry };
+          if (event.src_country) {
+            if (!newByCountry[event.src_country]) {
+              newByCountry[event.src_country] = { count: 0, blocked: 0, passed: 0 };
+            }
+            newByCountry[event.src_country].count += 1;
+            if (event.action === 'block') {
+              newByCountry[event.src_country].blocked += 1;
+            } else if (event.action === 'pass') {
+              newByCountry[event.src_country].passed += 1;
+            }
+          }
+          
           return {
             totalEvents: prev.totalEvents + 1,
             blocked: prev.blocked + (event.action === 'block' ? 1 : 0),
             passed: prev.passed + (event.action === 'pass' ? 1 : 0),
             uniqueIps: newIps,
             countries: newCountries,
+            byCountry: newByCountry,
           };
         });
       }
@@ -150,18 +170,9 @@ export default function FirewallMap() {
     return () => clearInterval(cleanupInterval);
   }, []);
 
-  const fetchTopCountries = useCallback(async () => {
-    try {
-      const response = await api.getFirewallMapTopCountries(10);
-      setTopCountries(response.countries || []);
-    } catch (error) {
-      console.error('Failed to fetch top countries:', error);
-    }
-  }, []);
-
   const pollEvents = useCallback(async () => {
     try {
-      const response = await api.getFirewallMapRecent(50, 15);
+      const response = await api.getFirewallMapRecent(50, 60);
       if (Array.isArray(response)) {
         addEvents(response);
       }
@@ -179,22 +190,19 @@ export default function FirewallMap() {
       passed: 0,
       uniqueIps: new Set(),
       countries: new Set(),
+      byCountry: {},
     });
     
-    fetchTopCountries();
     pollEvents();
     
     pollRef.current = setInterval(() => {
       pollEvents();
     }, POLL_INTERVAL);
     
-    const countriesInterval = setInterval(fetchTopCountries, 10000);
-    
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      clearInterval(countriesInterval);
     };
-  }, [pollEvents, fetchTopCountries]);
+  }, [pollEvents]);
 
   const getEventOpacity = (event: FirewallEvent): number => {
     const age = Date.now() - event.addedAt;
@@ -343,8 +351,8 @@ export default function FirewallMap() {
         </div>
       </div>
 
-      {/* Top Countries Overlay - Right Side */}
-      <div className="absolute top-24 right-4 z-[1000] w-52">
+      {/* Top Countries Overlay - Left Side */}
+      <div className="absolute top-24 left-4 z-[1000] w-60">
         <div className="bg-black/80 backdrop-blur-sm border border-neon-orange/30 rounded-xl p-3">
           <div className="flex items-center gap-2 mb-3">
             <Globe className="w-4 h-4 text-neon-orange" />
@@ -352,7 +360,10 @@ export default function FirewallMap() {
           </div>
           <div className="space-y-1.5 max-h-[350px] overflow-y-auto">
             {topCountries.length === 0 ? (
-              <div className="text-center py-2 text-text-muted text-xs">Loading...</div>
+              <div className="text-center py-4 text-text-muted text-xs">
+                <div className="text-lg mb-1">—</div>
+                <div>Waiting for events...</div>
+              </div>
             ) : (
               topCountries.map((country, index) => {
                 const maxCount = topCountries[0]?.count || 1;

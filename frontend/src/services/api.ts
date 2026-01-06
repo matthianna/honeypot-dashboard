@@ -227,17 +227,15 @@ class ApiService {
     return response.data;
   }
 
-  async getRecentActivity(limit = 10): Promise<{
-    events: Array<{
-      timestamp: string;
-      honeypot: string;
-      event_type: string;
-      src_ip?: string;
-      details?: string;
-    }>;
+  async getPeriodComparison(timeRange: TimeRange = '24h'): Promise<{
+    time_range: string;
+    current_period: { start: string; end: string; total_events: number; unique_ips: number; countries: number };
+    previous_period: { start: string; end: string; total_events: number; unique_ips: number; countries: number };
+    changes: { events_change_percent: number; ips_change_percent: number; countries_change_percent: number };
+    new_threats: { new_ips_count: number; new_countries_count: number; new_countries: string[] };
   }> {
-    const response = await this.client.get('/api/dashboard/recent-activity', {
-      params: { limit },
+    const response = await this.client.get('/api/dashboard/period-comparison', {
+      params: { time_range: timeRange },
     });
     return response.data;
   }
@@ -251,6 +249,21 @@ class ApiService {
   }> {
     const response = await this.client.get('/api/dashboard/credentials', {
       params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
+  async getRecentActivity(limit = 10): Promise<{
+    events: Array<{
+      timestamp: string;
+      honeypot: string;
+      event_type: string;
+      src_ip?: string;
+      details?: string;
+    }>;
+  }> {
+    const response = await this.client.get('/api/dashboard/recent-activity', {
+      params: { limit },
     });
     return response.data;
   }
