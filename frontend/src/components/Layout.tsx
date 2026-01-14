@@ -23,6 +23,7 @@ import SessionTimeoutWarning from './SessionTimeoutWarning';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Global Map', href: '/global-map', icon: Globe },
   { name: 'Attack Map', href: '/attack-map', icon: Map },
   { name: 'Firewall Map', href: '/firewall-map', icon: ShieldAlert },
   { name: 'MITRE ATT&CK', href: '/mitre', icon: Crosshair },
@@ -30,7 +31,7 @@ const navigation = [
 ];
 
 const honeypots = [
-  { name: 'Cowrie (SSH)', href: '/cowrie', icon: Terminal, color: 'text-neon-green' },
+  { name: 'Cowrie (SSH)', href: '/cowrie-demo', icon: Terminal, color: 'text-neon-green' },
   { name: 'Dionaea', href: '/dionaea', icon: Bug, color: 'text-neon-blue' },
   { name: 'Galah (Web)', href: '/galah', icon: Globe, color: 'text-neon-orange' },
   { name: 'RDPY (RDP)', href: '/rdpy', icon: Monitor, color: 'text-neon-purple' },

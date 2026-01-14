@@ -195,6 +195,26 @@ class ApiService {
   // Alias for map components
   getGeoDistribution = (timeRange: TimeRange = '24h') => this.getGeoStats(timeRange);
 
+  // Get choropleth map data (countries with attack counts, excluding firewall)
+  async getChoroplethMapData(timeRange: TimeRange = '7d'): Promise<{
+    time_range: string;
+    countries: Array<{
+      name: string;
+      iso3: string | null;
+      count: number;
+      unique_ips: number;
+      honeypots: Record<string, number>;
+    }>;
+    total_countries: number;
+    max_count: number;
+    total_attacks: number;
+  }> {
+    const response = await this.client.get('/api/dashboard/choropleth-map', {
+      params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
   // Get geo distribution for a specific honeypot
   async getHoneypotGeoDistribution(honeypot: string, timeRange: TimeRange = '24h'): Promise<GeoDistributionResponse> {
     const response = await this.client.get<GeoDistributionResponse>(`/api/${honeypot}/geo`, {
@@ -902,6 +922,13 @@ class ApiService {
 
   async getGalahSessionAnalysis(timeRange: TimeRange): Promise<Record<string, unknown>> {
     const response = await this.client.get('/api/galah/session-analysis', {
+      params: { time_range: timeRange },
+    });
+    return response.data;
+  }
+
+  async getGalahEngagementAnalysis(timeRange: TimeRange): Promise<Record<string, unknown>> {
+    const response = await this.client.get('/api/galah/engagement-analysis', {
       params: { time_range: timeRange },
     });
     return response.data;

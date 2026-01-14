@@ -782,6 +782,163 @@ export default function Cowrie() {
             <p className="text-sm text-text-secondary">Side-by-side analysis of Plain, OpenAI, and Ollama honeypot variants</p>
           </div>
 
+          {/* THESIS KEY: Attacker Time Wasted Analysis */}
+          <Card className="border-2 border-neon-purple/30 bg-gradient-to-br from-bg-card to-neon-purple/5">
+            <CardHeader 
+              title="⏱️ Attacker Time Wasted Analysis" 
+              subtitle="Key thesis metric: How long do AI honeypots keep attackers engaged compared to traditional honeypots?" 
+              icon={<Clock className="w-5 h-5 text-neon-purple" />}
+            />
+            <CardContent>
+              {comparisonLoading ? (
+                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Time Wasted Summary Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {comparison.map((v) => {
+                      const totalTimeSeconds = (v.duration?.avg || 0) * (v.metrics?.sessions || 0);
+                      const hours = Math.floor(totalTimeSeconds / 3600);
+                      const minutes = Math.floor((totalTimeSeconds % 3600) / 60);
+                      const plainData = comparison.find(c => c.variant === 'plain');
+                      const plainAvg = plainData?.duration?.avg || 1;
+                      const improvement = plainAvg > 0 ? ((v.duration?.avg || 0) / plainAvg - 1) * 100 : 0;
+                      
+                      return (
+                        <div 
+                          key={v.variant} 
+                          className="bg-bg-secondary rounded-xl p-5 border-2 relative overflow-hidden"
+                          style={{ borderColor: `${VARIANT_COLORS[v.variant]}50` }}
+                        >
+                          <div className="absolute inset-0 opacity-5" style={{ background: `linear-gradient(135deg, ${VARIANT_COLORS[v.variant]}, transparent)` }} />
+                          <div className="relative z-10">
+                            <div className="flex items-center justify-between mb-3">
+                              <span className="font-semibold text-lg" style={{ color: VARIANT_COLORS[v.variant] }}>
+                                {VARIANT_LABELS[v.variant] || v.variant}
+                              </span>
+                              {v.variant !== 'plain' && improvement > 0 && (
+                                <span className="text-xs px-2 py-1 bg-neon-green/20 text-neon-green rounded-full font-bold">
+                                  +{improvement.toFixed(0)}% longer
+                                </span>
+                              )}
+                              {v.variant === 'plain' && (
+                                <span className="text-xs px-2 py-1 bg-text-muted/20 text-text-muted rounded-full">
+                                  Baseline
+                                </span>
+                              )}
+                            </div>
+                            
+                            <div className="space-y-3">
+                              <div>
+                                <div className="text-xs text-text-muted mb-1">Avg Session Duration</div>
+                                <div className="text-3xl font-bold font-mono" style={{ color: VARIANT_COLORS[v.variant] }}>
+                                  {(v.duration?.avg || 0).toFixed(1)}<span className="text-lg text-text-muted">s</span>
+                                </div>
+                              </div>
+                              
+                              <div>
+                                <div className="text-xs text-text-muted mb-1">Total Attacker Time Wasted</div>
+                                <div className="text-xl font-bold text-white">
+                                  {hours > 0 && <span>{hours}<span className="text-sm text-text-muted">h </span></span>}
+                                  {minutes}<span className="text-sm text-text-muted">m</span>
+                                </div>
+                                <div className="text-xs text-text-secondary mt-1">
+                                  ({v.metrics?.sessions || 0} sessions × {(v.duration?.avg || 0).toFixed(1)}s avg)
+                                </div>
+                              </div>
+                              
+                              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-bg-hover">
+                                <div>
+                                  <div className="text-xs text-text-muted">Max Duration</div>
+                                  <div className="font-mono text-sm text-white">{(v.duration?.max || 0).toFixed(0)}s</div>
+                                </div>
+                                <div>
+                                  <div className="text-xs text-text-muted">P90 Duration</div>
+                                  <div className="font-mono text-sm text-white">{(v.duration?.p90 || 0).toFixed(1)}s</div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Duration Comparison Bar Chart */}
+                  <div className="bg-bg-secondary rounded-lg p-4">
+                    <h4 className="text-sm font-medium text-text-secondary mb-3">Session Duration Comparison (Higher = Better Deception)</h4>
+                    <div className="h-16">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart 
+                          data={comparison.map(c => ({ 
+                            name: VARIANT_LABELS[c.variant] || c.variant, 
+                            duration: c.duration?.avg || 0,
+                            variant: c.variant
+                          }))} 
+                          layout="vertical"
+                        >
+                          <XAxis type="number" stroke="#888" tick={{ fill: '#888', fontSize: 11 }} unit="s" />
+                          <YAxis type="category" dataKey="name" stroke="#888" tick={{ fill: '#888', fontSize: 12 }} width={120} />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #333', borderRadius: '8px' }}
+                            formatter={(value: number) => [`${value.toFixed(1)}s`, 'Avg Duration']}
+                          />
+                          <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
+                            {comparison.map((c) => (
+                              <Cell key={c.variant} fill={VARIANT_COLORS[c.variant] || '#888'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Thesis Insight */}
+                  <div className="bg-neon-purple/10 border border-neon-purple/30 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <Zap className="w-5 h-5 text-neon-purple flex-shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="font-medium text-neon-purple mb-1">Thesis Insight</h4>
+                        <p className="text-sm text-text-secondary">
+                          {(() => {
+                            const plainData = comparison.find(c => c.variant === 'plain');
+                            const openaiData = comparison.find(c => c.variant === 'openai');
+                            const ollamaData = comparison.find(c => c.variant === 'ollama');
+                            const plainAvg = plainData?.duration?.avg || 0;
+                            const openaiAvg = openaiData?.duration?.avg || 0;
+                            const ollamaAvg = ollamaData?.duration?.avg || 0;
+                            const bestAI = openaiAvg > ollamaAvg ? 'OpenAI' : 'Ollama';
+                            const bestAIValue = Math.max(openaiAvg, ollamaAvg);
+                            const improvement = plainAvg > 0 ? ((bestAIValue / plainAvg - 1) * 100).toFixed(0) : 0;
+                            
+                            if (bestAIValue > plainAvg && plainAvg > 0) {
+                              return (
+                                <>
+                                  The <strong className="text-neon-blue">{bestAI}</strong> variant keeps attackers engaged <strong className="text-neon-green">{improvement}% longer</strong> than 
+                                  the traditional Cowrie honeypot ({bestAIValue.toFixed(1)}s vs {plainAvg.toFixed(1)}s average).
+                                  This demonstrates that AI-powered interactive responses effectively waste more attacker time and resources.
+                                </>
+                              );
+                            } else if (plainAvg > 0) {
+                              return (
+                                <>
+                                  Based on current data, session durations are similar across variants.
+                                  More data may be needed to establish significant differences in attacker engagement.
+                                </>
+                              );
+                            } else {
+                              return 'Collecting data to analyze attacker engagement patterns...';
+                            }
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Variant Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {variantsLoading ? (

@@ -13,7 +13,6 @@ import {
   Cell,
 } from 'recharts';
 import Card, { CardHeader, CardContent } from '../components/Card';
-import StatsCard from '../components/StatsCard';
 import TimeRangeSelector from '../components/TimeRangeSelector';
 import Tabs from '../components/Tabs';
 import DataTable from '../components/DataTable';
@@ -207,8 +206,14 @@ export default function Firewall() {
     },
   ];
 
-  // Port scan chart data
-  const portScanChartData = (portScans || []).slice(0, 10).map((scan: PortScanDetection, index: number) => ({
+  // Helper to filter out internal/noise IPs
+  const filterInternalIps = <T extends { src_ip: string }>(items: T[]): T[] => {
+    return items.filter(item => !item.src_ip.startsWith('10.246.') && item.src_ip !== '0.0.0.0');
+  };
+
+  // Port scan chart data (filtered)
+  const filteredPortScans = filterInternalIps(portScans || []);
+  const portScanChartData = filteredPortScans.slice(0, 10).map((scan: PortScanDetection, index: number) => ({
     ip: scan.src_ip.length > 15 ? scan.src_ip.substring(0, 12) + '...' : scan.src_ip,
     fullIp: scan.src_ip,
     ports: scan.unique_ports,
@@ -216,8 +221,9 @@ export default function Firewall() {
     country: scan.country || 'Unknown',
   }));
 
-  // Repeat offender chart data
-  const offenderChartData = (repeatOffenders || []).slice(0, 10).map((offender: RepeatOffender, index: number) => ({
+  // Repeat offender chart data (filtered)
+  const filteredRepeatOffenders = filterInternalIps(repeatOffenders || []);
+  const offenderChartData = filteredRepeatOffenders.slice(0, 10).map((offender: RepeatOffender, index: number) => ({
     ip: offender.src_ip.length > 15 ? offender.src_ip.substring(0, 12) + '...' : offender.src_ip,
     fullIp: offender.src_ip,
     blocks: offender.total_blocks,
@@ -226,6 +232,19 @@ export default function Firewall() {
     ports: offender.targeted_ports.slice(0, 5).join(', '),
   }));
 
+  // Calculate top ports from blocked traffic
+  const topPorts = blocked?.reduce((acc: Record<number, number>, item: FirewallBlockedTraffic) => {
+    item.ports.forEach(port => {
+      acc[port] = (acc[port] || 0) + item.count;
+    });
+    return acc;
+  }, {}) || {};
+  
+  const topPortsData = Object.entries(topPorts)
+    .map(([port, count]) => ({ port: parseInt(port), count: count as number }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
   const tabs = [
     {
       id: 'overview',
@@ -233,73 +252,304 @@ export default function Firewall() {
       icon: <BarChart2 className="w-4 h-4" />,
       content: (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-            <StatsCard title="Total Events" value={stats?.total_events || 0} color="yellow" loading={statsLoading} />
-            <StatsCard title="Unique IPs" value={stats?.unique_ips || 0} color="blue" loading={statsLoading} />
-            <StatsCard title="Port Scanners" value={portScans?.length || 0} color="orange" loading={portScansLoading} />
-            <StatsCard title="Repeat Offenders" value={repeatOffenders?.length || 0} color="red" loading={repeatOffendersLoading} />
-          </div>
-
-          <Card>
-            <CardHeader title="Firewall Event Timeline" icon={<Clock className="w-5 h-5" />} />
-            <CardContent>
-              {timelineLoading ? (
-                <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
-              ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={timeline?.data || []}>
-                      <defs>
-                        <linearGradient id="colorFirewall" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#ffff00" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="#ffff00" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
-                      <XAxis dataKey="timestamp" tickFormatter={formatTimestamp} stroke="#888888" />
-                      <YAxis stroke="#888888" />
-                      <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
-                      <Area type="monotone" dataKey="count" stroke="#ffff00" fill="url(#colorFirewall)" strokeWidth={2} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Actions Distribution */}
-          {actions?.actions && actions.actions.length > 0 && (
-            <Card>
-              <CardHeader title="Action Distribution" icon={<Filter className="w-5 h-5" />} />
-              <CardContent>
-                <div className="flex flex-wrap gap-4">
-                  {actions.actions.map((item) => {
-                    const actionColors: Record<string, string> = {
-                      block: 'border-neon-red text-neon-red',
-                      pass: 'border-neon-green text-neon-green',
-                      nat: 'border-neon-blue text-neon-blue',
-                    };
-                    return (
-                      <div
-                        key={item.action}
-                        className={`px-4 py-3 rounded-lg border ${actionColors[item.action] || 'border-bg-hover text-text-secondary'} bg-bg-secondary`}
-                      >
-                        <div className="text-2xl font-display font-bold">{item.count.toLocaleString()}</div>
-                        <div className="text-sm uppercase">{item.action}</div>
-                      </div>
-                    );
-                  })}
+          {/* Enhanced Stats Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <Card className="bg-gradient-to-br from-neon-yellow/10 to-transparent border-neon-yellow/30">
+              <CardContent className="p-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl bg-neon-yellow/20">
+                    <BarChart2 className="w-6 h-6 text-neon-yellow" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-yellow">
+                      {statsLoading ? '...' : (stats?.total_events || 0).toLocaleString()}
+                    </div>
+                    <div className="text-sm text-text-secondary">Total Events</div>
+                  </div>
                 </div>
               </CardContent>
             </Card>
-          )}
 
-          <Card>
-            <CardHeader title="Blocked Traffic" icon={<ShieldAlert className="w-5 h-5" />} />
-            <CardContent className="p-0">
-              <DataTable columns={blockedColumns} data={blocked || []} loading={blockedLoading} emptyMessage="No blocked traffic" />
-            </CardContent>
-          </Card>
+            <Card className="bg-gradient-to-br from-neon-blue/10 to-transparent border-neon-blue/30">
+              <CardContent className="p-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl bg-neon-blue/20">
+                    <Users className="w-6 h-6 text-neon-blue" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-blue">
+                      {statsLoading ? '...' : (stats?.unique_ips || 0).toLocaleString()}
+                    </div>
+                    <div className="text-sm text-text-secondary">Unique IPs</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-gradient-to-br from-neon-orange/10 to-transparent border-neon-orange/30">
+              <CardContent className="p-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl bg-neon-orange/20">
+                    <Scan className="w-6 h-6 text-neon-orange" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-orange">
+                      {portScansLoading ? '...' : (portScans?.length || 0)}
+                    </div>
+                    <div className="text-sm text-text-secondary">Port Scanners</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-gradient-to-br from-neon-red/10 to-transparent border-neon-red/30">
+              <CardContent className="p-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl bg-neon-red/20">
+                    <ShieldAlert className="w-6 h-6 text-neon-red" />
+                  </div>
+                  <div>
+                    <div className="text-3xl font-display font-bold text-neon-red">
+                      {repeatOffendersLoading ? '...' : (repeatOffenders?.length || 0)}
+                    </div>
+                    <div className="text-sm text-text-secondary">Repeat Offenders</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Timeline and Actions Distribution Row */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Timeline Chart - larger */}
+            <Card className="lg:col-span-2">
+              <CardHeader title="Firewall Event Timeline" subtitle="Traffic over time" icon={<Clock className="w-5 h-5" />} />
+              <CardContent>
+                {timelineLoading ? (
+                  <div className="h-72 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : (
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={timeline?.data || []}>
+                        <defs>
+                          <linearGradient id="colorFirewall" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#ffff00" stopOpacity={0.4} />
+                            <stop offset="95%" stopColor="#ffff00" stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                        <XAxis dataKey="timestamp" tickFormatter={formatTimestamp} stroke="#888888" tick={{ fontSize: 11 }} />
+                        <YAxis stroke="#888888" tick={{ fontSize: 11 }} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                          labelFormatter={(ts) => new Date(ts).toLocaleString()}
+                          formatter={(value: number) => [value.toLocaleString(), 'Events']}
+                        />
+                        <Area type="monotone" dataKey="count" stroke="#ffff00" fill="url(#colorFirewall)" strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Actions Distribution - enhanced */}
+            <Card>
+              <CardHeader title="Action Distribution" subtitle="Block vs Pass vs NAT" icon={<Filter className="w-5 h-5" />} />
+              <CardContent>
+                {actions?.actions && actions.actions.length > 0 ? (
+                  <div className="space-y-4">
+                    {actions.actions.map((item) => {
+                      const totalActions = actions.actions.reduce((sum, a) => sum + a.count, 0);
+                      const percentage = totalActions > 0 ? ((item.count / totalActions) * 100).toFixed(1) : '0';
+                      const actionConfig: Record<string, { color: string; bg: string }> = {
+                        block: { color: '#ff3366', bg: 'rgba(255, 51, 102, 0.2)' },
+                        pass: { color: '#39ff14', bg: 'rgba(57, 255, 20, 0.2)' },
+                        nat: { color: '#00d4ff', bg: 'rgba(0, 212, 255, 0.2)' },
+                      };
+                      const config = actionConfig[item.action] || { color: '#888', bg: 'rgba(136, 136, 136, 0.2)' };
+                      
+                      return (
+                        <div key={item.action} className="p-4 rounded-xl" style={{ backgroundColor: config.bg }}>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-sm uppercase font-bold" style={{ color: config.color }}>
+                              {item.action}
+                            </span>
+                            <span className="text-lg font-mono font-bold" style={{ color: config.color }}>
+                              {item.count.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-2 bg-bg-secondary rounded-full overflow-hidden">
+                              <div 
+                                className="h-full rounded-full transition-all"
+                                style={{ width: `${percentage}%`, backgroundColor: config.color }}
+                              />
+                            </div>
+                            <span className="text-xs text-text-muted font-mono">{percentage}%</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="h-48 flex items-center justify-center text-text-muted">No action data</div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Top Ports and Blocked Traffic Row */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Top Targeted Ports - Full Width with Chart and Table */}
+            <Card className="lg:col-span-2">
+              <CardHeader 
+                title="Top Targeted Ports" 
+                subtitle="Most attacked destination ports with service information"
+                icon={<Target className="w-5 h-5 text-neon-orange" />}
+              />
+              <CardContent>
+                {blockedLoading ? (
+                  <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+                ) : topPortsData.length > 0 ? (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Chart */}
+                    <div className="h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={topPortsData} layout="vertical" margin={{ left: 10 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                          <XAxis type="number" stroke="#888888" tick={{ fontSize: 11 }} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+                          <YAxis 
+                            dataKey="port" 
+                            type="category" 
+                            stroke="#888888"
+                            width={60}
+                            tick={{ fontSize: 12, fill: '#aaaaaa' }}
+                            tickFormatter={(v) => `${v}`}
+                          />
+                          <Tooltip
+                            contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }}
+                            formatter={(value: number) => [value.toLocaleString(), 'Attacks']}
+                            labelFormatter={(label) => `Port ${label}`}
+                          />
+                          <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                            {topPortsData.map((_, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {/* Detailed Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-bg-secondary">
+                          <tr>
+                            <th className="text-left py-3 px-4 text-text-secondary font-medium">#</th>
+                            <th className="text-left py-3 px-4 text-text-secondary font-medium">Port</th>
+                            <th className="text-left py-3 px-4 text-text-secondary font-medium">Service</th>
+                            <th className="text-right py-3 px-4 text-text-secondary font-medium">Attacks</th>
+                            <th className="text-right py-3 px-4 text-text-secondary font-medium">Share</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-bg-hover">
+                          {topPortsData.map((item, index) => {
+                            const totalAttacks = topPortsData.reduce((sum, p) => sum + p.count, 0);
+                            const percentage = ((item.count / totalAttacks) * 100).toFixed(1);
+                            const portServices: Record<number, string> = {
+                              21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS',
+                              67: 'DHCP', 80: 'HTTP', 110: 'POP3', 123: 'NTP', 137: 'NetBIOS',
+                              138: 'NetBIOS', 139: 'NetBIOS', 143: 'IMAP', 161: 'SNMP',
+                              389: 'LDAP', 443: 'HTTPS', 445: 'SMB', 465: 'SMTPS',
+                              514: 'Syslog', 587: 'SMTP', 993: 'IMAPS', 995: 'POP3S',
+                              1433: 'MSSQL', 1521: 'Oracle', 3306: 'MySQL', 3389: 'RDP',
+                              5432: 'PostgreSQL', 5900: 'VNC', 6379: 'Redis', 8080: 'HTTP-Alt',
+                              8443: 'HTTPS-Alt', 27017: 'MongoDB', 51: 'IMP', 15: 'Netstat',
+                              26: 'RSFTP', 20: 'FTP-Data',
+                            };
+                            return (
+                              <tr key={item.port} className="hover:bg-bg-hover/50">
+                                <td className="py-3 px-4">
+                                  <div 
+                                    className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+                                    style={{ backgroundColor: `${COLORS[index % COLORS.length]}30`, color: COLORS[index % COLORS.length] }}
+                                  >
+                                    {index + 1}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span className="font-mono text-lg font-bold text-white">{item.port}</span>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span className="text-text-secondary">{portServices[item.port] || 'Unknown'}</span>
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <span className="font-mono font-bold" style={{ color: COLORS[index % COLORS.length] }}>
+                                    {item.count.toLocaleString()}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    <div className="w-16 h-2 bg-bg-secondary rounded-full overflow-hidden">
+                                      <div 
+                                        className="h-full rounded-full" 
+                                        style={{ width: `${percentage}%`, backgroundColor: COLORS[index % COLORS.length] }}
+                                      />
+                                    </div>
+                                    <span className="text-text-muted text-xs w-12 text-right">{percentage}%</span>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-64 flex items-center justify-center text-text-muted">No port data</div>
+                )}
+              </CardContent>
+            </Card>
+
+          </div>
+
+          {/* Blocked Traffic Tables */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Top Blocked Sources */}
+            <Card>
+              <CardHeader 
+                title="Top Blocked Sources" 
+                subtitle="Most blocked IP addresses"
+                icon={<ShieldAlert className="w-5 h-5 text-neon-red" />}
+              />
+              <CardContent className="p-0">
+                <div className="max-h-80 overflow-y-auto">
+                  <DataTable columns={blockedColumns} data={(blocked || []).filter((b: FirewallBlockedTraffic) => {
+                    return !b.src_ip.startsWith('10.246.') && b.src_ip !== '0.0.0.0';
+                  }).slice(0, 15)} loading={blockedLoading} emptyMessage="No blocked traffic" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* All Blocked Traffic */}
+            <Card>
+              <CardHeader 
+                title="All Blocked Traffic" 
+                subtitle={`${(blocked || []).filter((b: FirewallBlockedTraffic) => {
+                  return !b.src_ip.startsWith('10.246.') && b.src_ip !== '0.0.0.0';
+                }).length} blocked sources`}
+                icon={<ShieldAlert className="w-5 h-5" />}
+              />
+              <CardContent className="p-0">
+                <div className="max-h-80 overflow-y-auto">
+                  <DataTable columns={blockedColumns} data={(blocked || []).filter((b: FirewallBlockedTraffic) => {
+                    return !b.src_ip.startsWith('10.246.') && b.src_ip !== '0.0.0.0';
+                  })} loading={blockedLoading} emptyMessage="No blocked traffic" />
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </div>
       ),
     },
@@ -395,8 +645,8 @@ export default function Firewall() {
                   </div>
                   <div>
                     <div className="text-3xl font-display font-bold text-neon-purple">
-                      {portScans && portScans.length > 0 
-                        ? Math.max(...portScans.map((s: PortScanDetection) => s.unique_ports))
+                      {filteredPortScans.length > 0 
+                        ? Math.max(...filteredPortScans.map((s: PortScanDetection) => s.unique_ports))
                         : 0}
                     </div>
                     <div className="text-sm text-text-secondary">Max Ports by Single IP</div>
@@ -473,7 +723,7 @@ export default function Firewall() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-bg-hover">
-                      {(portScans || []).slice(0, 15).map((scan: PortScanDetection, index: number) => (
+                      {filteredPortScans.slice(0, 25).map((scan: PortScanDetection, index: number) => (
                         <tr key={scan.src_ip} className="hover:bg-bg-hover/50">
                           <td className="py-3 px-4">
                             <div className="flex items-center gap-2">
@@ -550,8 +800,8 @@ export default function Firewall() {
                   </div>
                   <div>
                     <div className="text-3xl font-display font-bold text-neon-purple">
-                      {repeatOffenders && repeatOffenders.length > 0 
-                        ? Math.max(...repeatOffenders.map((o: RepeatOffender) => o.total_blocks)).toLocaleString()
+                      {filteredRepeatOffenders.length > 0 
+                        ? Math.max(...filteredRepeatOffenders.map((o: RepeatOffender) => o.total_blocks)).toLocaleString()
                         : 0}
                     </div>
                     <div className="text-sm text-text-secondary">Max Blocks by Single IP</div>
@@ -628,7 +878,7 @@ export default function Firewall() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-bg-hover">
-                      {(repeatOffenders || []).slice(0, 15).map((offender: RepeatOffender, index: number) => (
+                      {filteredRepeatOffenders.slice(0, 25).map((offender: RepeatOffender, index: number) => (
                         <tr key={offender.src_ip} className="hover:bg-bg-hover/50">
                           <td className="py-3 px-4">
                             <div className="flex items-center gap-2">

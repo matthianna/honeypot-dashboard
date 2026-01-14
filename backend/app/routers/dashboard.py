@@ -412,6 +412,88 @@ async def get_unified_stats(
     }
 
 
+@router.get("/choropleth-map")
+async def get_choropleth_map_data(
+    time_range: str = Query(default="7d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Get country attack data for choropleth map visualization.
+    Returns attack counts by country with ISO codes for map matching.
+    EXCLUDES firewall data.
+    """
+    es = get_es_service()
+    
+    # Country name to ISO3 mapping for common countries
+    COUNTRY_TO_ISO3 = {
+        "United States": "USA", "China": "CHN", "Russia": "RUS", "Germany": "DEU",
+        "France": "FRA", "United Kingdom": "GBR", "India": "IND", "Brazil": "BRA",
+        "Netherlands": "NLD", "Vietnam": "VNM", "South Korea": "KOR", "Japan": "JPN",
+        "Indonesia": "IDN", "Taiwan": "TWN", "Ukraine": "UKR", "Poland": "POL",
+        "Romania": "ROU", "Italy": "ITA", "Spain": "ESP", "Canada": "CAN",
+        "Australia": "AUS", "Thailand": "THA", "Singapore": "SGP", "Malaysia": "MYS",
+        "Philippines": "PHL", "Mexico": "MEX", "Argentina": "ARG", "Colombia": "COL",
+        "Turkey": "TUR", "Pakistan": "PAK", "Bangladesh": "BGD", "Egypt": "EGY",
+        "South Africa": "ZAF", "Nigeria": "NGA", "Kenya": "KEN", "Morocco": "MAR",
+        "Iran": "IRN", "Iraq": "IRQ", "Saudi Arabia": "SAU", "United Arab Emirates": "ARE",
+        "Israel": "ISR", "Sweden": "SWE", "Norway": "NOR", "Finland": "FIN",
+        "Denmark": "DNK", "Belgium": "BEL", "Austria": "AUT", "Switzerland": "CHE",
+        "Czech Republic": "CZE", "Hungary": "HUN", "Bulgaria": "BGR", "Greece": "GRC",
+        "Portugal": "PRT", "Ireland": "IRL", "New Zealand": "NZL", "Hong Kong": "HKG",
+        "Chile": "CHL", "Peru": "PER", "Venezuela": "VEN", "Ecuador": "ECU",
+        "Bolivia": "BOL", "Paraguay": "PRY", "Uruguay": "URY", "Panama": "PAN",
+        "Costa Rica": "CRI", "Guatemala": "GTM", "Cuba": "CUB", "Dominican Republic": "DOM",
+        "Puerto Rico": "PRI", "Jamaica": "JAM", "Trinidad and Tobago": "TTO",
+        "Kazakhstan": "KAZ", "Uzbekistan": "UZB", "Azerbaijan": "AZE", "Georgia": "GEO",
+        "Armenia": "ARM", "Belarus": "BLR", "Moldova": "MDA", "Lithuania": "LTU",
+        "Latvia": "LVA", "Estonia": "EST", "Serbia": "SRB", "Croatia": "HRV",
+        "Slovenia": "SVN", "Bosnia and Herzegovina": "BIH", "North Macedonia": "MKD",
+        "Albania": "ALB", "Montenegro": "MNE", "Kosovo": "XKX", "Cyprus": "CYP",
+        "Malta": "MLT", "Luxembourg": "LUX", "Iceland": "ISL", "Slovakia": "SVK",
+        "Cambodia": "KHM", "Myanmar": "MMR", "Laos": "LAO", "Sri Lanka": "LKA",
+        "Nepal": "NPL", "Afghanistan": "AFG", "Algeria": "DZA", "Tunisia": "TUN",
+        "Libya": "LBY", "Sudan": "SDN", "Ethiopia": "ETH", "Tanzania": "TZA",
+        "Uganda": "UGA", "Ghana": "GHA", "Cameroon": "CMR", "Ivory Coast": "CIV",
+        "Senegal": "SEN", "Zimbabwe": "ZWE", "Zambia": "ZMB", "Mozambique": "MOZ",
+        "Angola": "AGO", "Democratic Republic of the Congo": "COD", "Republic of the Congo": "COG",
+        "Madagascar": "MDG", "Kuwait": "KWT", "Qatar": "QAT", "Bahrain": "BHR",
+        "Oman": "OMN", "Jordan": "JOR", "Lebanon": "LBN", "Syria": "SYR",
+        "Yemen": "YEM", "Mongolia": "MNG", "North Korea": "PRK", "Brunei": "BRN",
+        "Macau": "MAC", "Palestine": "PSE", "Réunion": "REU", "Mauritius": "MUS",
+        "Maldives": "MDV", "Seychelles": "SYC", "Bhutan": "BTN", "Timor-Leste": "TLS",
+    }
+    
+    # Get country breakdown excluding firewall
+    country_breakdown = await es.get_global_country_breakdown(time_range, exclude_firewall=True)
+    
+    countries = []
+    max_count = 0
+    
+    for c in country_breakdown["countries"]:
+        country_name = c["country"]
+        count = c["total_events"]
+        iso3 = COUNTRY_TO_ISO3.get(country_name, None)
+        
+        if count > max_count:
+            max_count = count
+        
+        countries.append({
+            "name": country_name,
+            "iso3": iso3,
+            "count": count,
+            "unique_ips": c.get("unique_ips", 0),
+            "honeypots": c.get("honeypots", {})
+        })
+    
+    return {
+        "time_range": time_range,
+        "countries": countries,
+        "total_countries": country_breakdown["total_countries"],
+        "max_count": max_count,
+        "total_attacks": sum(c["count"] for c in countries)
+    }
+
+
 @router.get("/protocol-distribution")
 async def get_protocol_distribution(
     time_range: str = Query(default="24h", pattern="^(1h|24h|7d|30d)$"),

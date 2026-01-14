@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard';
 import AttackMap from './pages/AttackMap';
 import FirewallMap from './pages/FirewallMap';
 import Cowrie from './pages/Cowrie';
+import CowrieDemo from './pages/CowrieDemo';
 import Dionaea from './pages/Dionaea';
 import Galah from './pages/Galah';
 import GalahAttackers from './pages/GalahAttackers';
@@ -15,6 +16,7 @@ import Heralding from './pages/Heralding';
 import Firewall from './pages/Firewall';
 import Attackers from './pages/Attackers';
 import Mitre from './pages/Mitre';
+import GlobalMap from './pages/GlobalMap';
 import LoadingSpinner from './components/LoadingSpinner';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -52,6 +54,7 @@ function App() {
           <Route path="attack-map" element={<ErrorBoundary><AttackMap /></ErrorBoundary>} />
           <Route path="firewall-map" element={<ErrorBoundary><FirewallMap /></ErrorBoundary>} />
           <Route path="cowrie" element={<ErrorBoundary><Cowrie /></ErrorBoundary>} />
+          <Route path="cowrie-demo" element={<ErrorBoundary><CowrieDemo /></ErrorBoundary>} />
           <Route path="dionaea" element={<ErrorBoundary><Dionaea /></ErrorBoundary>} />
           <Route path="galah" element={<ErrorBoundary><Galah /></ErrorBoundary>} />
           <Route path="galah/attackers" element={<ErrorBoundary><GalahAttackers /></ErrorBoundary>} />
@@ -60,6 +63,7 @@ function App() {
           <Route path="firewall" element={<ErrorBoundary><Firewall /></ErrorBoundary>} />
           <Route path="attackers" element={<ErrorBoundary><Attackers /></ErrorBoundary>} />
           <Route path="mitre" element={<ErrorBoundary><Mitre /></ErrorBoundary>} />
+          <Route path="global-map" element={<ErrorBoundary><GlobalMap /></ErrorBoundary>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

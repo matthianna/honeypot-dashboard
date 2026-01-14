@@ -19,7 +19,7 @@ interface HoneypotStatus {
 }
 
 const HONEYPOT_CONFIG = [
-  { id: 'cowrie', name: 'Cowrie (SSH)', icon: Terminal, color: '#39ff14', href: '/cowrie' },
+  { id: 'cowrie', name: 'Cowrie (SSH)', icon: Terminal, color: '#39ff14', href: '/cowrie-demo' },
   { id: 'dionaea', name: 'Dionaea', icon: Bug, color: '#00d4ff', href: '/dionaea' },
   { id: 'galah', name: 'Galah (Web)', icon: Globe, color: '#ff6600', href: '/galah' },
   { id: 'rdpy', name: 'RDPY (RDP)', icon: Monitor, color: '#bf00ff', href: '/rdpy' },

@@ -258,59 +258,98 @@ export default function UnexposedPortsAnalysis({ timeRange }: UnexposedPortsAnal
         </Card>
       </div>
 
-      {/* Port Table - Enhanced readability */}
+      {/* Full Port Table - All unexposed ports */}
       <Card>
         <CardHeader 
-          title="Unexposed Port Details" 
-          subtitle={`${unexposed_ports.length} unexposed ports under attack`}
+          title="All Unexposed Ports Under Attack" 
+          subtitle={`Complete list of ${unexposed_ports.length} unexposed ports being targeted`}
           icon={<EyeOff className="w-5 h-5" />}
         />
         <CardContent className="p-0">
-          <div className="max-h-96 overflow-y-auto">
+          <div className="max-h-[600px] overflow-y-auto">
             <table className="w-full">
-              <thead className="sticky top-0 bg-bg-card border-b border-bg-hover">
+              <thead className="sticky top-0 bg-bg-card border-b border-bg-hover z-10">
                 <tr>
+                  <th className="text-left py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">#</th>
                   <th className="text-left py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">Port</th>
                   <th className="text-left py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">Service</th>
                   <th className="text-right py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">Attacks</th>
                   <th className="text-right py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">Attackers</th>
                   <th className="text-left py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">Protocol</th>
+                  <th className="text-left py-4 px-6 text-xs uppercase tracking-wider text-text-muted font-semibold">% of Total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-bg-hover">
-                {unexposed_ports.slice(0, 25).map((port, index) => (
-                  <tr key={port.port} className="hover:bg-bg-hover/50 transition-colors">
-                    <td className="py-4 px-6">
-                      <div className="flex items-center gap-3">
-                        <div 
-                          className="w-2 h-2 rounded-full" 
-                          style={{ backgroundColor: COLORS[index % COLORS.length] }}
-                        />
-                        <span className="font-mono text-lg font-bold text-neon-orange">{port.port}</span>
-                      </div>
-                    </td>
-                    <td className="py-4 px-6">
-                      <span className="text-text-primary font-medium">{port.service}</span>
-                    </td>
-                    <td className="py-4 px-6 text-right">
-                      <span className="font-mono text-lg font-bold text-neon-red">
-                        {port.attack_count.toLocaleString()}
-                      </span>
-                    </td>
-                    <td className="py-4 px-6 text-right">
-                      <span className="font-mono text-neon-blue">
-                        {port.unique_attackers.toLocaleString()}
-                      </span>
-                    </td>
-                    <td className="py-4 px-6">
-                      <span className="text-xs uppercase px-2 py-1 bg-bg-secondary rounded text-text-muted">
-                        {port.protocols.join(', ')}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {unexposed_ports.map((port, index) => {
+                  const percentage = summary.total_attacks > 0 
+                    ? ((port.attack_count / summary.total_attacks) * 100).toFixed(1)
+                    : '0';
+                  return (
+                    <tr key={port.port} className="hover:bg-bg-hover/50 transition-colors">
+                      <td className="py-3 px-6">
+                        <span className="text-text-muted text-sm">{index + 1}</span>
+                      </td>
+                      <td className="py-3 px-6">
+                        <div className="flex items-center gap-3">
+                          <div 
+                            className="w-2 h-2 rounded-full" 
+                            style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                          />
+                          <span className="font-mono text-lg font-bold text-neon-orange">{port.port}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-6">
+                        <span className="text-text-primary font-medium">{port.service}</span>
+                      </td>
+                      <td className="py-3 px-6 text-right">
+                        <span className="font-mono text-lg font-bold text-neon-red">
+                          {port.attack_count.toLocaleString()}
+                        </span>
+                      </td>
+                      <td className="py-3 px-6 text-right">
+                        <span className="font-mono text-neon-blue">
+                          {port.unique_attackers.toLocaleString()}
+                        </span>
+                      </td>
+                      <td className="py-3 px-6">
+                        <span className="text-xs uppercase px-2 py-1 bg-bg-secondary rounded text-text-muted">
+                          {port.protocols.join(', ')}
+                        </span>
+                      </td>
+                      <td className="py-3 px-6">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-2 bg-bg-secondary rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-neon-red rounded-full"
+                              style={{ width: `${Math.min(parseFloat(percentage) * 2, 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-text-muted font-mono">{percentage}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+          {/* Table Footer with summary */}
+          <div className="border-t border-bg-hover px-6 py-4 bg-bg-secondary/50">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-text-muted">
+                Showing all <span className="text-neon-orange font-bold">{unexposed_ports.length}</span> unexposed ports
+              </span>
+              <div className="flex items-center gap-6">
+                <span className="text-text-muted">
+                  Total Attacks: <span className="text-neon-red font-mono font-bold">{summary.total_attacks.toLocaleString()}</span>
+                </span>
+                <span className="text-text-muted">
+                  Unique Attackers: <span className="text-neon-blue font-mono font-bold">
+                    {unexposed_ports.reduce((sum, p) => sum + p.unique_attackers, 0).toLocaleString()}
+                  </span>
+                </span>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

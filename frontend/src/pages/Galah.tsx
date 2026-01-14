@@ -103,6 +103,15 @@ export default function Galah() {
     [timeRange]
   );
 
+  const { data: sessionAnalysis, loading: sessionAnalysisLoading } = useApiWithRefresh(
+    useCallback(() => api.getGalahSessionAnalysis(timeRange), [timeRange]),
+    [timeRange]
+  );
+
+  const { data: engagementData, loading: engagementLoading } = useApiWithRefresh(
+    useCallback(() => api.getGalahEngagementAnalysis(timeRange), [timeRange]),
+    [timeRange]
+  );
 
   // Fetch all interactions with pagination
   const fetchAllInteractions = useCallback(async (offset = 0) => {
@@ -282,6 +291,148 @@ export default function Galah() {
             </CardContent>
           </Card>
 
+          {/* Attacker Session Insights */}
+          <Card className="border-2 border-neon-blue/20">
+            <CardHeader 
+              title="🔍 Attacker Session Insights" 
+              subtitle="How attackers browse the honeypot - multiple page visits in a session"
+              icon={<Users className="w-5 h-5 text-neon-blue" />}
+            />
+            <CardContent>
+              {sessionAnalysisLoading ? (
+                <div className="h-48 flex items-center justify-center"><LoadingSpinner /></div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Session Stats Summary */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                      <div className="text-3xl font-bold text-neon-blue">
+                        {(sessionAnalysis as Record<string, unknown>)?.total_sessions?.toLocaleString() || 0}
+                      </div>
+                      <div className="text-xs text-text-secondary mt-1">Total Sessions</div>
+                    </div>
+                    <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                      <div className="text-3xl font-bold text-neon-green">
+                        {((sessionAnalysis as Record<string, unknown>)?.multi_request_sessions as number)?.toLocaleString() || 0}
+                      </div>
+                      <div className="text-xs text-text-secondary mt-1">Multi-Page Sessions</div>
+                    </div>
+                    <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                      <div className="text-3xl font-bold text-neon-orange">
+                        {(((sessionAnalysis as Record<string, unknown>)?.session_stats as Record<string, unknown>)?.avg_requests_per_session as number)?.toFixed(1) || '0'}
+                      </div>
+                      <div className="text-xs text-text-secondary mt-1">Avg Requests/Session</div>
+                    </div>
+                    <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                      <div className="text-3xl font-bold text-neon-purple">
+                        {(((sessionAnalysis as Record<string, unknown>)?.session_stats as Record<string, unknown>)?.max_requests_in_session as number)?.toLocaleString() || 0}
+                      </div>
+                      <div className="text-xs text-text-secondary mt-1">Max Requests in Session</div>
+                    </div>
+                  </div>
+
+                  {/* Top Multi-Request Sessions */}
+                  <div className="bg-bg-secondary rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-medium text-text-primary">Top Multi-Page Sessions</h4>
+                      <button
+                        onClick={() => navigate('/galah/attackers')}
+                        className="text-xs px-3 py-1 bg-neon-blue/20 text-neon-blue rounded hover:bg-neon-blue/30 transition-colors"
+                      >
+                        View All Sessions →
+                      </button>
+                    </div>
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {(((sessionAnalysis as Record<string, unknown>)?.top_sessions as Array<{
+                        session_id: string;
+                        source_ip: string;
+                        request_count: number;
+                        unique_paths: number;
+                        duration_seconds: number | null;
+                        first_request: string;
+                        country: string | null;
+                      }>) || [])
+                        .filter(s => s.request_count > 1)
+                        .slice(0, 8)
+                        .map((session, idx) => (
+                          <div 
+                            key={session.session_id} 
+                            className="flex items-center justify-between p-3 bg-bg-primary rounded-lg hover:bg-bg-hover transition-colors cursor-pointer"
+                            onClick={() => navigate('/galah/attackers')}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-neon-blue/20 flex items-center justify-center text-neon-blue font-bold text-sm">
+                                {idx + 1}
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-sm text-text-primary">{session.source_ip}</span>
+                                  {session.country && (
+                                    <span className="text-xs text-text-muted flex items-center gap-1">
+                                      <Globe className="w-3 h-3" />
+                                      {session.country}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-text-muted mt-0.5">
+                                  {new Date(session.first_request).toLocaleString()}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <div className="flex items-center gap-2">
+                                <span className="text-lg font-bold text-neon-green">{session.request_count}</span>
+                                <span className="text-xs text-text-muted">pages</span>
+                              </div>
+                              <div className="text-xs text-text-secondary">
+                                {session.unique_paths} unique paths
+                              </div>
+                              {session.duration_seconds && (
+                                <div className="text-xs text-neon-orange">
+                                  {session.duration_seconds < 60 
+                                    ? `${Math.round(session.duration_seconds)}s` 
+                                    : `${Math.floor(session.duration_seconds / 60)}m ${Math.round(session.duration_seconds % 60)}s`}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      {(((sessionAnalysis as Record<string, unknown>)?.top_sessions as unknown[]) || []).filter((s: unknown) => (s as {request_count: number}).request_count > 1).length === 0 && (
+                        <div className="text-center py-6 text-text-muted text-sm">
+                          No multi-page sessions found in this time range
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Insight Box */}
+                  <div className="bg-neon-blue/10 border border-neon-blue/30 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <Eye className="w-5 h-5 text-neon-blue flex-shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="font-medium text-neon-blue mb-1">Session Analysis</h4>
+                        <p className="text-sm text-text-secondary">
+                          {(() => {
+                            const totalSessions = (sessionAnalysis as Record<string, unknown>)?.total_sessions as number || 0;
+                            const multiSessions = (sessionAnalysis as Record<string, unknown>)?.multi_request_sessions as number || 0;
+                            const percentage = totalSessions > 0 ? ((multiSessions / totalSessions) * 100).toFixed(1) : 0;
+                            return (
+                              <>
+                                <strong className="text-neon-green">{percentage}%</strong> of sessions involve multiple page visits, 
+                                indicating attackers are exploring the honeypot beyond initial reconnaissance.
+                                Click on "View All Sessions" to see complete browsing histories.
+                              </>
+                            );
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Top 5 Attack Countries */}
           <Card>
             <CardHeader 
@@ -307,6 +458,340 @@ export default function Galah() {
               )}
             </CardContent>
           </Card>
+        </div>
+      ),
+    },
+    {
+      id: 'engagement',
+      label: 'Engagement Analysis',
+      icon: <TrendingUp className="w-4 h-4" />,
+      content: (
+        <div className="space-y-6">
+          {engagementLoading ? (
+            <div className="h-64 flex items-center justify-center"><LoadingSpinner /></div>
+          ) : engagementData ? (
+            <>
+              {/* Summary Stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
+                <Card className="bg-gradient-to-br from-neon-orange/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-neon-orange">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.total_requests?.toLocaleString() || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Total Requests</div>
+                  </CardContent>
+                </Card>
+                <Card className="bg-gradient-to-br from-neon-blue/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-neon-blue">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.unique_attackers?.toLocaleString() || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Unique Attackers</div>
+                  </CardContent>
+                </Card>
+                <Card className="bg-gradient-to-br from-neon-green/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-neon-green">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.total_sessions?.toLocaleString() || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Total Sessions</div>
+                  </CardContent>
+                </Card>
+                <Card className="bg-gradient-to-br from-neon-purple/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-neon-purple">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.unique_paths_explored?.toLocaleString() || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Paths Explored</div>
+                  </CardContent>
+                </Card>
+                <Card className="bg-gradient-to-br from-yellow-500/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-yellow-400">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.avg_requests_per_attacker || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Avg Req/Attacker</div>
+                  </CardContent>
+                </Card>
+                <Card className="bg-gradient-to-br from-pink-500/10 to-transparent">
+                  <CardContent className="p-4">
+                    <div className="text-2xl font-display font-bold text-pink-400">
+                      {((engagementData as Record<string, unknown>).summary as Record<string, number>)?.avg_sessions_per_attacker || 0}
+                    </div>
+                    <div className="text-xs text-text-secondary">Avg Sessions/Attacker</div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Return Visitors & Persistent Attackers */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card className="border-2 border-neon-green/20">
+                  <CardHeader 
+                    title="🔄 Return Visitors" 
+                    subtitle="Attackers who initiated multiple sessions"
+                  />
+                  <CardContent>
+                    <div className="flex items-center gap-6">
+                      <div className="text-center">
+                        <div className="text-4xl font-display font-bold text-neon-green">
+                          {((engagementData as Record<string, unknown>).return_visitors as Record<string, number>)?.count || 0}
+                        </div>
+                        <div className="text-sm text-text-secondary">Attackers</div>
+                      </div>
+                      <div className="flex-1 space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-text-secondary">Percentage</span>
+                          <span className="font-bold text-neon-green">
+                            {((engagementData as Record<string, unknown>).return_visitors as Record<string, number>)?.percentage || 0}%
+                          </span>
+                        </div>
+                        <div className="h-3 bg-bg-secondary rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-neon-green rounded-full transition-all"
+                            style={{ width: `${((engagementData as Record<string, unknown>).return_visitors as Record<string, number>)?.percentage || 0}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-text-muted">
+                          These attackers found the honeypot interesting enough to come back and explore more
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="border-2 border-neon-purple/20">
+                  <CardHeader 
+                    title="⏰ Persistent Attackers" 
+                    subtitle="Attackers who returned after 24+ hours"
+                  />
+                  <CardContent>
+                    <div className="flex items-center gap-6">
+                      <div className="text-center">
+                        <div className="text-4xl font-display font-bold text-neon-purple">
+                          {((engagementData as Record<string, unknown>).persistent_attackers as Record<string, number>)?.count || 0}
+                        </div>
+                        <div className="text-sm text-text-secondary">Attackers</div>
+                      </div>
+                      <div className="flex-1 space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-text-secondary">Percentage</span>
+                          <span className="font-bold text-neon-purple">
+                            {((engagementData as Record<string, unknown>).persistent_attackers as Record<string, number>)?.percentage || 0}%
+                          </span>
+                        </div>
+                        <div className="h-3 bg-bg-secondary rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-neon-purple rounded-full transition-all"
+                            style={{ width: `${((engagementData as Record<string, unknown>).persistent_attackers as Record<string, number>)?.percentage || 0}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-text-muted">
+                          These attackers remembered the honeypot and came back on different days
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Session Depth & Time Wasted */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card>
+                  <CardHeader title="Session Depth Distribution" subtitle="Requests per session" />
+                  <CardContent>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={((engagementData as Record<string, unknown>).session_depth_distribution as Array<{depth: string; count: number}>) || []}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#252532" />
+                          <XAxis dataKey="depth" stroke="#888888" tick={{ fill: '#888888', fontSize: 12 }} />
+                          <YAxis stroke="#888888" />
+                          <Tooltip contentStyle={{ backgroundColor: '#1a1a25', border: '1px solid #252532', borderRadius: '8px' }} />
+                          <Bar dataKey="count" fill="#ff6600" radius={[4, 4, 0, 0]}>
+                            {(((engagementData as Record<string, unknown>).session_depth_distribution as Array<{depth: string; count: number}>) || []).map((_, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="mt-4 text-sm text-text-secondary">
+                      <strong className="text-neon-orange">Insight:</strong> Sessions with more requests indicate attackers exploring multiple pages, searching for vulnerabilities.
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="border-2 border-neon-orange/20">
+                  <CardHeader title="⏱️ Attacker Time Wasted" subtitle="How long attackers spent on the honeypot" />
+                  <CardContent>
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                        <div className="text-3xl font-display font-bold text-neon-orange">
+                          {(() => {
+                            const seconds = ((engagementData as Record<string, unknown>).session_duration as Record<string, number>)?.avg_seconds || 0;
+                            if (seconds < 60) return `${Math.round(seconds)}s`;
+                            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+                            return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+                          })()}
+                        </div>
+                        <div className="text-xs text-text-secondary">Avg Session Duration</div>
+                      </div>
+                      <div className="bg-bg-secondary rounded-lg p-4 text-center">
+                        <div className="text-3xl font-display font-bold text-neon-green">
+                          {(() => {
+                            const seconds = ((engagementData as Record<string, unknown>).session_duration as Record<string, number>)?.max_seconds || 0;
+                            if (seconds < 60) return `${Math.round(seconds)}s`;
+                            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+                            return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+                          })()}
+                        </div>
+                        <div className="text-xs text-text-secondary">Longest Session</div>
+                      </div>
+                    </div>
+                    <div className="bg-gradient-to-r from-neon-orange/20 to-neon-green/20 rounded-lg p-4 text-center">
+                      <div className="text-4xl font-display font-bold text-white mb-1">
+                        {((engagementData as Record<string, unknown>).session_duration as Record<string, number>)?.total_time_wasted_hours?.toFixed(1) || 0}
+                        <span className="text-lg text-text-secondary ml-1">hours</span>
+                      </div>
+                      <div className="text-sm text-text-secondary">Total Attacker Time Wasted</div>
+                    </div>
+                    <div className="mt-4 text-sm text-text-secondary">
+                      <strong className="text-neon-green">Thesis Insight:</strong> The AI honeypot successfully wasted attacker resources by keeping them engaged with realistic responses.
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Top Attackers */}
+              <Card>
+                <CardHeader 
+                  title="🎯 Top Engaged Attackers" 
+                  subtitle="Most active attackers by request count"
+                  action={
+                    <button
+                      onClick={() => navigate('/galah-attackers')}
+                      className="text-sm text-neon-orange hover:underline"
+                    >
+                      View All Attackers →
+                    </button>
+                  }
+                />
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-bg-hover">
+                          <th className="text-left py-3 px-2 text-text-secondary">#</th>
+                          <th className="text-left py-3 px-2 text-text-secondary">IP Address</th>
+                          <th className="text-left py-3 px-2 text-text-secondary">Country</th>
+                          <th className="text-right py-3 px-2 text-text-secondary">Requests</th>
+                          <th className="text-right py-3 px-2 text-text-secondary">Sessions</th>
+                          <th className="text-right py-3 px-2 text-text-secondary">Paths</th>
+                          <th className="text-right py-3 px-2 text-text-secondary">Req/Session</th>
+                          <th className="text-right py-3 px-2 text-text-secondary">Time Span</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(((engagementData as Record<string, unknown>).top_attackers as Array<{
+                          ip: string;
+                          total_requests: number;
+                          sessions: number;
+                          unique_paths: number;
+                          time_span_hours: number;
+                          country: string | null;
+                          avg_requests_per_session: number;
+                        }>) || []).slice(0, 15).map((attacker, idx) => (
+                          <tr key={attacker.ip} className="border-b border-bg-hover/50 hover:bg-bg-hover/30">
+                            <td className="py-3 px-2 text-text-muted">{idx + 1}</td>
+                            <td className="py-3 px-2">
+                              <IPLink ip={attacker.ip} />
+                            </td>
+                            <td className="py-3 px-2 text-text-secondary">{attacker.country || 'Unknown'}</td>
+                            <td className="py-3 px-2 text-right font-mono font-bold text-neon-orange">{attacker.total_requests}</td>
+                            <td className="py-3 px-2 text-right font-mono text-neon-blue">{attacker.sessions}</td>
+                            <td className="py-3 px-2 text-right font-mono text-neon-green">{attacker.unique_paths}</td>
+                            <td className="py-3 px-2 text-right font-mono text-neon-purple">{attacker.avg_requests_per_session}</td>
+                            <td className="py-3 px-2 text-right text-text-secondary">
+                              {attacker.time_span_hours < 1 
+                                ? `${Math.round(attacker.time_span_hours * 60)}m` 
+                                : attacker.time_span_hours < 24 
+                                  ? `${Math.round(attacker.time_span_hours)}h`
+                                  : `${Math.round(attacker.time_span_hours / 24)}d`}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* HTTP Methods & Countries */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card>
+                  <CardHeader title="HTTP Methods Used" />
+                  <CardContent>
+                    <div className="space-y-3">
+                      {Object.entries((engagementData as Record<string, unknown>).methods as Record<string, number> || {}).sort((a, b) => b[1] - a[1]).map(([method, count], idx) => {
+                        const total = Object.values((engagementData as Record<string, unknown>).methods as Record<string, number> || {}).reduce((a, b) => a + b, 0);
+                        const percentage = total > 0 ? (count / total * 100).toFixed(1) : 0;
+                        return (
+                          <div key={method} className="flex items-center gap-3">
+                            <span className={`font-mono text-sm w-16 px-2 py-1 rounded text-center ${
+                              method === 'GET' ? 'bg-neon-green/20 text-neon-green' :
+                              method === 'POST' ? 'bg-neon-orange/20 text-neon-orange' :
+                              method === 'PUT' ? 'bg-neon-blue/20 text-neon-blue' :
+                              method === 'DELETE' ? 'bg-neon-red/20 text-neon-red' :
+                              'bg-neon-purple/20 text-neon-purple'
+                            }`}>{method}</span>
+                            <div className="flex-1 h-4 bg-bg-secondary rounded-full overflow-hidden">
+                              <div 
+                                className="h-full rounded-full transition-all"
+                                style={{ 
+                                  width: `${percentage}%`,
+                                  backgroundColor: COLORS[idx % COLORS.length]
+                                }}
+                              />
+                            </div>
+                            <span className="font-mono text-sm text-text-muted w-20 text-right">{count.toLocaleString()}</span>
+                            <span className="text-xs text-text-secondary w-12 text-right">{percentage}%</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader title="Top Attacking Countries" />
+                  <CardContent>
+                    <div className="space-y-3">
+                      {(((engagementData as Record<string, unknown>).top_countries as Array<{country: string; count: number}>) || []).slice(0, 10).map((c, idx) => {
+                        const maxCount = (((engagementData as Record<string, unknown>).top_countries as Array<{country: string; count: number}>) || [])[0]?.count || 1;
+                        return (
+                          <div key={c.country} className="flex items-center gap-3">
+                            <span className="text-lg w-8">{idx < 3 ? ['🥇', '🥈', '🥉'][idx] : `${idx + 1}.`}</span>
+                            <span className="text-sm text-text-primary flex-1 truncate">{c.country}</span>
+                            <div className="w-32 h-3 bg-bg-secondary rounded-full overflow-hidden">
+                              <div 
+                                className="h-full rounded-full transition-all"
+                                style={{ 
+                                  width: `${(c.count / maxCount) * 100}%`,
+                                  backgroundColor: COLORS[idx % COLORS.length]
+                                }}
+                              />
+                            </div>
+                            <span className="font-mono text-sm text-neon-orange w-16 text-right">{c.count.toLocaleString()}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-12 text-text-secondary">No engagement data available</div>
+          )}
         </div>
       ),
     },

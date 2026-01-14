@@ -31,6 +31,7 @@ import {
 } from 'recharts';
 import TimeRangeSelector from '../components/TimeRangeSelector';
 import LoadingSpinner from '../components/LoadingSpinner';
+import WorldChoroplethMap from '../components/WorldChoroplethMap';
 import { useTimeRange } from '../hooks/useTimeRange';
 import { useApiWithRefresh } from '../hooks/useApi';
 import api from '../services/api';
@@ -74,12 +75,6 @@ export default function Dashboard() {
     30000
   );
 
-  // Period comparison for thesis visualization
-  const { data: periodComparison } = useApiWithRefresh(
-    useCallback(() => api.getPeriodComparison(timeRange), [timeRange]),
-    [timeRange],
-    60000
-  );
 
   // Animate total events counter - only animate the difference
   useEffect(() => {
@@ -470,82 +465,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Period Comparison - Thesis Widget */}
-      {periodComparison && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Events Change */}
-          <div className="bg-bg-card rounded-xl border border-bg-hover p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Activity className="w-5 h-5 text-neon-green" />
-                <span className="text-sm text-text-secondary">Events</span>
-              </div>
-              <span className={`flex items-center gap-1 text-sm font-bold ${
-                periodComparison.changes.events_change_percent >= 0 ? 'text-red-400' : 'text-green-400'
-              }`}>
-                {periodComparison.changes.events_change_percent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                {Math.abs(periodComparison.changes.events_change_percent)}%
-              </span>
-            </div>
-            <div className="text-2xl font-display font-bold text-white mb-1">
-              {periodComparison.current_period.total_events.toLocaleString()}
-            </div>
-            <div className="text-xs text-text-muted">
-              vs {periodComparison.previous_period.total_events.toLocaleString()} previous
-            </div>
-          </div>
-
-          {/* New Attackers */}
-          <div className="bg-bg-card rounded-xl border border-bg-hover p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Users className="w-5 h-5 text-neon-blue" />
-                <span className="text-sm text-text-secondary">Unique IPs</span>
-              </div>
-              <span className={`flex items-center gap-1 text-sm font-bold ${
-                periodComparison.changes.ips_change_percent >= 0 ? 'text-red-400' : 'text-green-400'
-              }`}>
-                {periodComparison.changes.ips_change_percent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                {Math.abs(periodComparison.changes.ips_change_percent)}%
-              </span>
-            </div>
-            <div className="text-2xl font-display font-bold text-white mb-1">
-              {periodComparison.current_period.unique_ips.toLocaleString()}
-            </div>
-            <div className="text-xs text-text-muted">
-              <span className="text-neon-orange">{periodComparison.new_threats.new_ips_count}</span> new attackers this period
-            </div>
-          </div>
-
-          {/* New Countries */}
-          <div className="bg-bg-card rounded-xl border border-bg-hover p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Globe className="w-5 h-5 text-neon-orange" />
-                <span className="text-sm text-text-secondary">Countries</span>
-              </div>
-              <span className={`flex items-center gap-1 text-sm font-bold ${
-                periodComparison.changes.countries_change_percent >= 0 ? 'text-red-400' : 'text-green-400'
-              }`}>
-                {periodComparison.changes.countries_change_percent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                {Math.abs(periodComparison.changes.countries_change_percent)}%
-              </span>
-            </div>
-            <div className="text-2xl font-display font-bold text-white mb-1">
-              {periodComparison.current_period.countries}
-            </div>
-            <div className="text-xs text-text-muted">
-              {periodComparison.new_threats.new_countries_count > 0 ? (
-                <>New: <span className="text-neon-red">{periodComparison.new_threats.new_countries.slice(0, 3).join(', ')}</span></>
-              ) : (
-                'No new countries'
-              )}
-            </div>
-          </div>
-
-        </div>
-      )}
-
       {/* Attack Distribution - Improved */}
       <div className="bg-bg-card rounded-xl border border-bg-hover overflow-hidden">
         <div className="flex items-center justify-between p-4 border-b border-bg-hover">
@@ -697,6 +616,20 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* World Attack Map - Choropleth */}
+      <div className="bg-bg-card rounded-xl border border-bg-hover overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-bg-hover">
+          <div className="flex items-center gap-2">
+            <Globe className="w-5 h-5 text-neon-orange" />
+            <span className="font-display font-bold text-white">Global Attack Origins Map</span>
+          </div>
+          <div className="text-xs text-text-muted">
+            Honeypots only (excludes firewall) • {timeRange} data
+          </div>
+        </div>
+        <WorldChoroplethMap timeRange={timeRange} height={450} />
       </div>
     </div>
   );

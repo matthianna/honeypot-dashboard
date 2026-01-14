@@ -1561,3 +1561,205 @@ async def get_galah_session_replay(
         "total_events": len(events),
         "duration_seconds": duration
     }
+
+
+@router.get("/engagement-analysis")
+async def get_galah_engagement_analysis(
+    time_range: str = Query(default="7d", pattern="^(1h|24h|7d|30d)$"),
+    _: str = Depends(get_current_user)
+):
+    """
+    Comprehensive engagement analysis for Galah honeypot.
+    Analyzes attacker behavior patterns, return visitors, session depth, time spent, etc.
+    """
+    es = get_es_service()
+    
+    result = await es.search(
+        index=INDEX,
+        query=es._get_time_range_query(time_range),
+        size=0,
+        aggs={
+            # Total unique attackers
+            "unique_attackers": {"cardinality": {"field": "source.ip"}},
+            # Total sessions
+            "unique_sessions": {"cardinality": {"field": "session.id"}},
+            # Attacker analysis
+            "attackers": {
+                "terms": {"field": "source.ip", "size": 500},
+                "aggs": {
+                    "sessions": {"cardinality": {"field": "session.id"}},
+                    "unique_paths": {"cardinality": {"field": "url.path"}},
+                    "first_seen": {"min": {"field": "@timestamp"}},
+                    "last_seen": {"max": {"field": "@timestamp"}},
+                    "unique_days": {
+                        "cardinality": {
+                            "field": "@timestamp",
+                            "precision_threshold": 40
+                        }
+                    },
+                    "geo": {
+                        "top_hits": {
+                            "size": 1,
+                            "_source": ["source.geo.country_name"]
+                        }
+                    }
+                }
+            },
+            # Session depth analysis
+            "session_depth": {
+                "terms": {"field": "session.id", "size": 1000},
+                "aggs": {
+                    "request_count": {"value_count": {"field": "@timestamp"}},
+                    "unique_paths": {"cardinality": {"field": "url.path"}},
+                    "first_request": {"min": {"field": "@timestamp"}},
+                    "last_request": {"max": {"field": "@timestamp"}}
+                }
+            },
+            # Paths explored
+            "paths": {"cardinality": {"field": "url.path"}},
+            # Methods used
+            "methods": {"terms": {"field": "http.request.method", "size": 10}},
+            # Hourly distribution
+            "hourly_distribution": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "calendar_interval": "hour"
+                }
+            },
+            # Top countries
+            "countries": {
+                "terms": {"field": "source.geo.country_name.keyword", "size": 20}
+            }
+        }
+    )
+    
+    aggs = result.get("aggregations", {})
+    
+    # Process attacker data
+    attackers_data = []
+    return_attackers = 0  # Attackers with multiple sessions
+    persistent_attackers = 0  # Attackers who came back on different occasions
+    
+    for bucket in aggs.get("attackers", {}).get("buckets", []):
+        sessions = bucket.get("sessions", {}).get("value", 1)
+        requests = bucket["doc_count"]
+        first_seen = bucket.get("first_seen", {}).get("value_as_string")
+        last_seen = bucket.get("last_seen", {}).get("value_as_string")
+        
+        # Calculate time span
+        time_span_hours = 0
+        if first_seen and last_seen:
+            try:
+                from datetime import datetime
+                first = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                last = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                time_span_hours = (last - first).total_seconds() / 3600
+            except Exception:
+                pass
+        
+        geo_hit = bucket.get("geo", {}).get("hits", {}).get("hits", [{}])[0]
+        country = geo_hit.get("_source", {}).get("source", {}).get("geo", {}).get("country_name")
+        
+        if sessions > 1:
+            return_attackers += 1
+        if time_span_hours > 24:  # Came back after more than 24 hours
+            persistent_attackers += 1
+            
+        attackers_data.append({
+            "ip": bucket["key"],
+            "total_requests": requests,
+            "sessions": sessions,
+            "unique_paths": bucket.get("unique_paths", {}).get("value", 0),
+            "time_span_hours": round(time_span_hours, 1),
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "country": country,
+            "avg_requests_per_session": round(requests / sessions, 1) if sessions else requests
+        })
+    
+    # Sort by total requests
+    attackers_data.sort(key=lambda x: -x["total_requests"])
+    
+    # Process session depth
+    session_depth_buckets = {"1": 0, "2-3": 0, "4-5": 0, "6-10": 0, "11-20": 0, "20+": 0}
+    session_durations = []
+    paths_per_session = []
+    
+    for bucket in aggs.get("session_depth", {}).get("buckets", []):
+        count = bucket.get("request_count", {}).get("value", 1)
+        paths = bucket.get("unique_paths", {}).get("value", 1)
+        paths_per_session.append(paths)
+        
+        first = bucket.get("first_request", {}).get("value_as_string")
+        last = bucket.get("last_request", {}).get("value_as_string")
+        
+        if first and last:
+            try:
+                from datetime import datetime
+                f = datetime.fromisoformat(first.replace("Z", "+00:00"))
+                l = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                duration = (l - f).total_seconds()
+                if duration > 0:
+                    session_durations.append(duration)
+            except Exception:
+                pass
+        
+        if count == 1:
+            session_depth_buckets["1"] += 1
+        elif count <= 3:
+            session_depth_buckets["2-3"] += 1
+        elif count <= 5:
+            session_depth_buckets["4-5"] += 1
+        elif count <= 10:
+            session_depth_buckets["6-10"] += 1
+        elif count <= 20:
+            session_depth_buckets["11-20"] += 1
+        else:
+            session_depth_buckets["20+"] += 1
+    
+    # Calculate engagement metrics
+    total_requests = result.get("hits", {}).get("total", {}).get("value", 0)
+    total_attackers = aggs.get("unique_attackers", {}).get("value", 0)
+    total_sessions = aggs.get("unique_sessions", {}).get("value", 0)
+    total_paths = aggs.get("paths", {}).get("value", 0)
+    
+    # Method distribution
+    methods = {m["key"]: m["doc_count"] for m in aggs.get("methods", {}).get("buckets", [])}
+    
+    # Country distribution
+    countries = [{"country": c["key"], "count": c["doc_count"]} for c in aggs.get("countries", {}).get("buckets", [])]
+    
+    return {
+        "summary": {
+            "total_requests": total_requests,
+            "unique_attackers": total_attackers,
+            "total_sessions": total_sessions,
+            "unique_paths_explored": total_paths,
+            "avg_requests_per_attacker": round(total_requests / total_attackers, 1) if total_attackers else 0,
+            "avg_sessions_per_attacker": round(total_sessions / total_attackers, 2) if total_attackers else 0,
+            "avg_paths_per_session": round(sum(paths_per_session) / len(paths_per_session), 1) if paths_per_session else 0,
+        },
+        "return_visitors": {
+            "count": return_attackers,
+            "percentage": round((return_attackers / total_attackers * 100), 1) if total_attackers else 0,
+            "description": "Attackers who initiated multiple sessions"
+        },
+        "persistent_attackers": {
+            "count": persistent_attackers,
+            "percentage": round((persistent_attackers / total_attackers * 100), 1) if total_attackers else 0,
+            "description": "Attackers who came back after 24+ hours"
+        },
+        "session_depth_distribution": [
+            {"depth": k, "count": v} for k, v in session_depth_buckets.items()
+        ],
+        "session_duration": {
+            "avg_seconds": round(sum(session_durations) / len(session_durations), 1) if session_durations else 0,
+            "max_seconds": round(max(session_durations), 1) if session_durations else 0,
+            "min_seconds": round(min(session_durations), 1) if session_durations else 0,
+            "total_time_wasted_hours": round(sum(session_durations) / 3600, 2) if session_durations else 0,
+        },
+        "methods": methods,
+        "top_attackers": attackers_data[:20],
+        "top_countries": countries[:10],
+        "time_range": time_range
+    }
